@@ -55,6 +55,9 @@ export async function applyTenantDbContext(tenantId?: string): Promise<void> {
   if (!id && !controlPlane) {
     throw new Error('TENANT_ID is required for engine mode; refusing unsafe global DB context');
   }
+  if (id && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error('TENANT_ID must be a valid tenant UUID from users.id');
+  }
   logger.info({ component: 'TenantContext', tenantId: id ?? null, controlPlane }, 'Tenant context validated');
 }
 
