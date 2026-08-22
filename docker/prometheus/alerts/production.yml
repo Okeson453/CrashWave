@@ -1,0 +1,150 @@
+# Production Alert Rules for BC.Game Crash Automation
+# These rules fire on the production environment and page the on-call operator.
+
+groups:
+  - name: crash-automation-critical
+    interval: 30s
+    rules:
+      - alert: CrashAutomationDown
+        expr: crash_automation_system_running == 0
+        for: 1m
+        labels:
+          severity: critical
+          env: production
+          team: operations
+        annotations:
+          summary: "Crash Automation system is down"
+          description: "The crash automation system has been stopped or crashed for more than 1 minute. Immediate operator intervention required."
+          runbook_url: "https://wiki.internal/runbooks/crash-automation-down"
+
+      - alert: CrashAutomationBrowserCrashed
+        expr: crash_automation_browser_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          env: production
+          team: operations
+        annotations:
+          summary: "Browser process has crashed"
+          description: "The browser automation process is not responding. The system may be unable to observe rounds or place bets."
+          runbook_url: "https://wiki.internal/runbooks/browser-crash"
+
+      - alert: CrashAutomationDatabaseUnavailable
+        expr: crash_automation_database_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          env: production
+          team: operations
+        annotations:
+          summary: "Database connection lost"
+          description: "PostgreSQL/TimescaleDB is unreachable. All persistence is failing. Betting must halt immediately."
+          runbook_url: "https://wiki.internal/runbooks/db-unavailable"
+
+      - alert: CrashAutomationRedisUnavailable
+        expr: crash_automation_redis_up == 0
+        for: 3m
+        labels:
+          severity: warning
+          env: production
+          team: operations
+        annotations:
+          summary: "Redis connection lost"
+          description: "Redis is unreachable. Distributed mutex has fallen back to in-memory. No split-brain protection."
+          runbook_url: "https://wiki.internal/runbooks/redis-unavailable"
+
+      - alert: CrashAutomationUnknownBets
+        expr: crash_automation_unknown_bets > 0
+        for: 5m
+        labels:
+          severity: critical
+          env: production
+          team: operations
+        annotations:
+          summary: "Unknown bets require reconciliation"
+          description: "{{ $value }} bet(s) are in UNKNOWN state. Recovery manager has failed to resolve them automatically."
+          runbook_url: "https://wiki.internal/runbooks/unknown-bets"
+
+      - alert: CrashAutomationHighTickLatency
+        expr: histogram_quantile(0.99, sum(rate(crash_automation_tick_latency_ms_bucket[5m])) by (le)) > 1000
+        for: 2m
+        labels:
+          severity: warning
+          env: production
+          team: operations
+        annotations:
+          summary: "Tick observation latency is degraded"
+          description: "P99 tick latency is {{ $value }}ms, exceeding 1000ms threshold. Betting should be paused."
+          runbook_url: "https://wiki.internal/runbooks/latency-degradation"
+
+      - alert: CrashAutomationDrawdownExceeded
+        expr: crash_automation_drawdown_percent > 50
+        for: 1m
+        labels:
+          severity: critical
+          env: production
+          team: operations
+        annotations:
+          summary: "Maximum drawdown exceeded"
+          description: "Current drawdown is {{ $value }}%, exceeding the 50% limit. All betting must stop immediately."
+          runbook_url: "https://wiki.internal/runbooks/drawdown-exceeded"
+
+      - alert: CrashAutomationConsecutiveLosses
+        expr: crash_automation_consecutive_losses >= 10
+        for: 1m
+        labels:
+          severity: warning
+          env: production
+          team: operations
+        annotations:
+          summary: "10+ consecutive losses"
+          description: "{{ $value }} consecutive losses detected. Consider pausing betting and reviewing strategy."
+          runbook_url: "https://wiki.internal/runbooks/consecutive-losses"
+
+      - alert: CrashAutomationEmergencyStopTriggered
+        expr: increase(crash_automation_emergency_stops_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          env: production
+          team: operations
+        annotations:
+          summary: "Emergency stop triggered"
+          description: "Emergency stop was triggered. System is halted. Operator must investigate and manually reset."
+          runbook_url: "https://wiki.internal/runbooks/emergency-stop"
+
+      - alert: CrashAutomationDailyLimitApproaching
+        expr: crash_automation_daily_entries_total / crash_automation_max_daily_entries > 0.9
+        for: 1m
+        labels:
+          severity: info
+          env: production
+          team: operations
+        annotations:
+          summary: "Daily entry limit approaching"
+          description: "{{ $value | humanizePercentage }} of daily entries used. Approaching 100 entry limit."
+          runbook_url: "https://wiki.internal/runbooks/daily-limit"
+
+      - alert: CrashAutomationBalanceLow
+        expr: crash_automation_current_balance_usd < 2000
+        for: 1m
+        labels:
+          severity: warning
+          env: production
+          team: operations
+        annotations:
+          summary: "Balance is low"
+          description: "Current balance is ${{ $value }}, below safe threshold of $2000."
+          runbook_url: "https://wiki.internal/runbooks/low-balance"
+
+      - alert: CrashAutomationConfigCorruption
+        expr: increase(crash_automation_config_validation_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          env: production
+          team: operations
+        annotations:
+          summary: "Configuration validation failed"
+          description: "Invalid configuration was rejected. Previous valid config is preserved."
+          runbook_url: "https://wiki.internal/runbooks/config-corruption"

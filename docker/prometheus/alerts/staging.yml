@@ -1,0 +1,73 @@
+# Staging Alert Rules for BC.Game Crash Automation
+# These rules fire on the staging environment and notify the team Slack channel.
+
+groups:
+  - name: crash-automation-staging
+    interval: 30s
+    rules:
+      - alert: StagingCrashAutomationDown
+        expr: crash_automation_system_running == 0
+        for: 2m
+        labels:
+          severity: warning
+          env: staging
+          team: dev
+        annotations:
+          summary: "[STAGING] Crash Automation system is down"
+          description: "Staging system has been stopped for more than 2 minutes."
+          runbook_url: "https://wiki.internal/runbooks/crash-automation-down"
+
+      - alert: StagingCrashAutomationBrowserCrashed
+        expr: crash_automation_browser_up == 0
+        for: 3m
+        labels:
+          severity: warning
+          env: staging
+          team: dev
+        annotations:
+          summary: "[STAGING] Browser process has crashed"
+          description: "Staging browser automation is not responding."
+
+      - alert: StagingCrashAutomationHighTickLatency
+        expr: histogram_quantile(0.95, sum(rate(crash_automation_tick_latency_ms_bucket[5m])) by (le)) > 500
+        for: 3m
+        labels:
+          severity: warning
+          env: staging
+          team: dev
+        annotations:
+          summary: "[STAGING] Tick latency above 500ms"
+          description: "P95 tick latency is {{ $value }}ms on staging. Target is <500ms."
+
+      - alert: StagingCrashAutomationTestFailures
+        expr: increase(crash_automation_test_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          env: staging
+          team: dev
+        annotations:
+          summary: "[STAGING] Test failures detected"
+          description: "{{ $value }} test failure(s) in the last hour on staging."
+
+      - alert: StagingCrashAutomationUnknownBets
+        expr: crash_automation_unknown_bets > 0
+        for: 10m
+        labels:
+          severity: warning
+          env: staging
+          team: dev
+        annotations:
+          summary: "[STAGING] Unknown bets require reconciliation"
+          description: "{{ $value }} bet(s) are in UNKNOWN state on staging."
+
+      - alert: StagingCrashAutomationDrawdownWarning
+        expr: crash_automation_drawdown_percent > 30
+        for: 2m
+        labels:
+          severity: info
+          env: staging
+          team: dev
+        annotations:
+          summary: "[STAGING] Drawdown above 30%"
+          description: "Current drawdown is {{ $value }}% on staging."

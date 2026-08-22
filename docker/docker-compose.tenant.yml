@@ -1,0 +1,34 @@
+# Tenant engine template (rendered/used by control-plane orchestrator)
+# Production isolation: set TENANT_DOCKER_NETWORK=none on orchestrator host
+# or use a private per-tenant network with no inter-tenant routes.
+version: '3.8'
+services:
+  tenant-engine:
+    image: ${TENANT_ENGINE_IMAGE:-bc-crash-automation:latest}
+    container_name: tenant-engine-${TENANT_ID}
+    environment:
+      TENANT_ID: ${TENANT_ID}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_KEY_PREFIX: tenant:${TENANT_ID}:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      BCGAME_USERNAME: ${BCGAME_USERNAME}
+      BCGAME_PASSWORD: ${BCGAME_PASSWORD}
+      BCGAME_2FA_SECRET: ${BCGAME_2FA_SECRET:-}
+      MODE: ${MODE:-observe-only}
+      FIXED_STAKE: ${FIXED_STAKE:-700}
+      FIXED_TARGET: ${FIXED_TARGET:-1.30}
+      MAX_DAILY_ENTRIES: ${MAX_DAILY_ENTRIES:-100}
+      TENANT_MASTER_KEY: ${TENANT_MASTER_KEY}
+      NODE_ENV: production
+    volumes:
+      - tenant-profile-${TENANT_ID}:/data/browser-profile
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+    restart: unless-stopped
+    # Uncomment for hard network isolation (requires host-side DB/redis access pattern):
+    # network_mode: none

@@ -1,0 +1,61 @@
+# Dependencies & build artifacts
+node_modules
+**/node_modules
+dist
+build
+out
+.next
+coverage
+.nyc_output
+*.tsbuildinfo
+
+# Git & VCS
+.git
+.gitignore
+.gitattributes
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+secrets
+**/secrets
+*.pem
+*.key
+credentials*
+*secret*
+
+# Docs, tests, and non-runtime assets (keep build fast)
+docs
+tests
+**/*.test.ts
+**/*.spec.ts
+**/*.md
+!README.md
+admin-dashboard
+CONTRIBUTING.md
+
+# Logs & runtime data
+logs
+*.log
+tmp
+temp
+*.tmp
+
+# IDE / OS
+.DS_Store
+.idea
+.vscode
+*.swp
+*~
+
+# Playwright local cache
+**/ms-playwright
+.playwright
+.cache
+
+# Misc
+docker-compose.override.yml
+.railway
+.vercel
+.turbo

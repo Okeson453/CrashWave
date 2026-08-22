@@ -1,0 +1,38 @@
+module.exports = {
+  root: true,
+  parser: '@typescript-eslint/parser',
+  parserOptions: {
+    project: './tsconfig.json',
+    tsconfigRootDir: __dirname,
+    sourceType: 'module',
+  },
+  plugins: ['@typescript-eslint', 'import'],
+  extends: [
+    'eslint:recommended',
+    'plugin:@typescript-eslint/recommended',
+    'plugin:@typescript-eslint/recommended-requiring-type-checking',
+    'plugin:import/errors',
+    'plugin:import/warnings',
+    'plugin:import/typescript',
+    'prettier',
+  ],
+  rules: {
+    '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    '@typescript-eslint/explicit-function-return-type': 'warn',
+    '@typescript-eslint/no-explicit-any': 'error',
+    '@typescript-eslint/no-floating-promises': 'error',
+    '@typescript-eslint/await-thenable': 'error',
+    '@typescript-eslint/no-misused-promises': 'error',
+    'import/order': ['error', { 'newlines-between': 'always' }],
+    'import/no-unresolved': 'off',
+    'no-console': 'warn',
+    'eqeqeq': ['error', 'always'],
+    'curly': ['error', 'all'],
+  },
+  env: {
+    node: true,
+    es2022: true,
+    jest: true,
+  },
+  ignorePatterns: ['dist/', 'node_modules/', 'coverage/', '*.js'],
+};

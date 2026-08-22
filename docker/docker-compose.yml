@@ -1,0 +1,103 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg15
+    container_name: crash-db
+    environment:
+      POSTGRES_USER: crashuser
+      POSTGRES_PASSWORD: crashpass
+      POSTGRES_DB: crashautomation
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crashuser -d crashautomation"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crash-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: crash-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crash-net
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: crash-app
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://crashuser:crashpass@db:5432/crashautomation
+      WAIT_FOR_SERVICES: "db:5432 redis:6379"
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: info
+      METRICS_PORT: "9090"
+    ports:
+      - "3000:3000"
+      - "9090:9090"
+    volumes:
+      - ../secrets:/app/secrets:ro
+      - ../config.yaml:/app/config.yaml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - crash-net
+    command: ["sh", "-c", "./scripts/wait-for-services.sh db:5432 redis:6379 && node dist/index.js"]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: crash-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - crash-net
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: crash-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
+    networks:
+      - crash-net
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  crash-net:
+    driver: bridge

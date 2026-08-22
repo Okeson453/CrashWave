@@ -1,0 +1,86 @@
+# Dependencies
+node_modules/
+admin-dashboard/node_modules/
+
+# Build outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+.next/
+admin-dashboard/.next/
+admin-dashboard/out/
+
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
+!.env*.example
+secrets/
+**/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+*secret*
+*password*
+*token*
+
+# Logs & runtime
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Test & coverage
+coverage/
+.nyc_output/
+*.lcov
+test-results/
+playwright-report/
+playwright/.cache/
+.cache/
+
+# Playwright browsers (local installs)
+**/ms-playwright/
+.playwright/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-*
+.project
+.classpath
+.settings/
+
+# Temporary / misc
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+.turbo/
+.vercel/
+.railway/
+
+# Docker
+docker-compose.override.yml
+
+# Optional local config overrides
+config.local.yaml
+config.local.yml
+*.local.yaml
+*.local.yml
+
+# Jest / TypeScript incremental
+.jest-cache/

@@ -1,0 +1,39 @@
+# Development Alert Rules for BC.Game Crash Automation
+# These rules fire on the dev environment and log to stdout only.
+
+groups:
+  - name: crash-automation-dev
+    interval: 60s
+    rules:
+      - alert: DevCrashAutomationDown
+        expr: crash_automation_system_running == 0
+        for: 5m
+        labels:
+          severity: info
+          env: dev
+          team: dev
+        annotations:
+          summary: "[DEV] Crash Automation system is down"
+          description: "Dev system has been stopped for more than 5 minutes."
+
+      - alert: DevCrashAutomationHighTickLatency
+        expr: histogram_quantile(0.99, sum(rate(crash_automation_tick_latency_ms_bucket[5m])) by (le)) > 2000
+        for: 5m
+        labels:
+          severity: info
+          env: dev
+          team: dev
+        annotations:
+          summary: "[DEV] Tick latency above 2000ms"
+          description: "P99 tick latency is {{ $value }}ms on dev. Check local machine load."
+
+      - alert: DevCrashAutomationBrowserCrashed
+        expr: crash_automation_browser_up == 0
+        for: 5m
+        labels:
+          severity: info
+          env: dev
+          team: dev
+        annotations:
+          summary: "[DEV] Browser process has crashed"
+          description: "Dev browser automation is not responding."
