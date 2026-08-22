@@ -22,10 +22,14 @@ secrets/
 *.key
 *.p12
 *.pfx
-credentials*
-*secret*
-*password*
-*token*
+credentials.json
+credentials*.json
+.credentials
+config/credentials*
+config/.secrets*
+*.secret
+local.env
+production.env
 
 # Logs & runtime
 logs/
