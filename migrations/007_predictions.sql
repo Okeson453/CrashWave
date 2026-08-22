@@ -2,7 +2,7 @@
 -- Enables auditability: what was predicted, was it accepted, what happened.
 
 CREATE TABLE IF NOT EXISTS predictions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     prediction_id VARCHAR(64) NOT NULL UNIQUE,
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
     round_id UUID REFERENCES rounds(id) ON DELETE SET NULL,
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_predictions_created ON predictions(created_at DES
 CREATE INDEX IF NOT EXISTS idx_predictions_model ON predictions(model_name, model_version);
 
 CREATE TABLE IF NOT EXISTS prediction_outcomes (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     prediction_id VARCHAR(64) NOT NULL REFERENCES predictions(prediction_id) ON DELETE CASCADE,
     round_id UUID REFERENCES rounds(id) ON DELETE SET NULL,
     risk_approved BOOLEAN,

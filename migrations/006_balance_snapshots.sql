@@ -1,7 +1,7 @@
 -- Migration 006: Balance tracking snapshots
 
 CREATE TABLE IF NOT EXISTS balance_snapshots (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
     bet_id UUID REFERENCES bets(id) ON DELETE SET NULL,
     round_id UUID REFERENCES rounds(id) ON DELETE SET NULL,

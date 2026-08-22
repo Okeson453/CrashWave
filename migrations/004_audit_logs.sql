@@ -1,7 +1,7 @@
 -- Migration 004: Immutable audit log table with partitioning
 
 CREATE TABLE IF NOT EXISTS audit_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
     actor VARCHAR(255) NOT NULL,
     action VARCHAR(128) NOT NULL,

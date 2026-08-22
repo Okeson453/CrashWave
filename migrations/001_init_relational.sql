@@ -1,11 +1,10 @@
 -- Migration 001: Initialize core relational tables
 -- Tables: sessions, config_versions, rounds, bets, health_checks, analytics_snapshots
-
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- UUID generation: using native gen_random_uuid() (Postgres 13+, no extension required)
 
 -- Sessions table
 CREATE TABLE IF NOT EXISTS sessions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at TIMESTAMPTZ,
     mode VARCHAR(32) NOT NULL DEFAULT 'observe-only' CHECK (mode IN ('observe-only', 'dry-run', 'live', 'maintenance')),
@@ -40,7 +39,7 @@ ON CONFLICT DO NOTHING;
 
 -- Rounds table
 CREATE TABLE IF NOT EXISTS rounds (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     external_round_id VARCHAR(255),
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
     started_at TIMESTAMPTZ,
@@ -54,7 +53,7 @@ CREATE TABLE IF NOT EXISTS rounds (
 
 -- Bets table
 CREATE TABLE IF NOT EXISTS bets (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
     round_id UUID REFERENCES rounds(id) ON DELETE SET NULL,
     daily_key VARCHAR(10) NOT NULL,
@@ -78,7 +77,7 @@ CREATE TABLE IF NOT EXISTS bets (
 
 -- Health checks table
 CREATE TABLE IF NOT EXISTS health_checks (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
     component VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL CHECK (status IN ('OK', 'DEGRADED', 'FAILING', 'UNKNOWN')),
@@ -88,7 +87,7 @@ CREATE TABLE IF NOT EXISTS health_checks (
 
 -- Analytics snapshots table
 CREATE TABLE IF NOT EXISTS analytics_snapshots (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     window_type VARCHAR(32) NOT NULL CHECK (window_type IN ('last_10', 'last_50', 'last_100', 'last_500', 'session', 'day', 'week', 'month', 'all')),
     window_size INTEGER,
