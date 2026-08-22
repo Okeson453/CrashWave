@@ -4,12 +4,15 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json ./
-RUN (npm ci --omit=dev || npm ci --omit=dev) \
+RUN npm ci --omit=dev --fetch-timeout=600000 --fetch-retries=5 --fetch-retry-mintimeout=20000 \
+ || (rm -rf node_modules && npm ci --omit=dev --fetch-timeout=600000 --fetch-retries=5) \
  && npm cache clean --force
 
 FROM base AS build
 COPY package.json package-lock.json tsconfig.json tsconfig.build.json ./
-RUN (npm ci --include=dev || npm ci --include=dev)
+RUN npm ci --include=dev --fetch-timeout=600000 --fetch-retries=5 --fetch-retry-mintimeout=20000 \
+ || (rm -rf node_modules && npm ci --include=dev --fetch-timeout=600000 --fetch-retries=5)
+RUN test -f node_modules/.bin/tsc || npm install typescript@5.9.3 --no-save
 COPY src/ ./src/
 COPY config.yaml ./
 RUN npm run build && npm prune --omit=dev
