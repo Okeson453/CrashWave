@@ -17,6 +17,7 @@ export function createRedisClient(config: RedisConfig): Redis {
   }
 
   const url = new URL(config.url);
+  const isTls = url.protocol === 'rediss:';
   const keyPrefix =
     config.keyPrefix ||
     process.env.REDIS_KEY_PREFIX ||
@@ -25,7 +26,9 @@ export function createRedisClient(config: RedisConfig): Redis {
   redisClient = new Redis({
     host: url.hostname,
     port: parseInt(url.port || '6379', 10),
-    password: config.password || undefined,
+    username: url.username ? decodeURIComponent(url.username) : undefined,
+    password: config.password || (url.password ? decodeURIComponent(url.password) : undefined),
+    tls: isTls ? {} : undefined,
     db: parseInt(url.pathname.replace('/', '') || '0', 10),
     keyPrefix: keyPrefix || undefined,
     commandTimeout: config.commandTimeoutMs ?? 5000,
