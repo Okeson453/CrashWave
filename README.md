@@ -314,6 +314,50 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 - [Operational Runbooks](docs/runbooks.md)
 - [Telegram Commands](docs/telegram-commands.md)
 - [Analytics Mathematics](docs/analytics-math.md)
+- [Startup Diagnosis & Troubleshooting](docs/STARTUP_DIAGNOSIS.md) — Container won't start? Healthcheck failing? Start here.
+
+## Deployment & Production
+
+### Pre-Deployment Checklist
+
+```bash
+# 1. Validate startup requirements
+node scripts/validate-startup.mjs
+
+# 2. Test build locally
+npm run build
+docker build -t crash-test .
+
+# 3. Test with required env vars
+docker run -e DATABASE_URL="postgresql://..." crash-test
+
+# 4. Commit all changes
+git status
+git add .
+git commit -m "ready for production"
+git push
+```
+
+### Railway Deployment
+
+**Environment Variables to Set** (in Railway service Variables tab):
+
+```
+DATABASE_URL          Required: PostgreSQL 15+ connection string
+REDIS_URL             Optional: Redis connection (app runs without it)
+TELEGRAM_BOT_TOKEN    Optional: Telegram bot API token
+TELEGRAM_OPERATOR_CHAT_ID Optional: Telegram user ID for alerts
+TENANT_MASTER_KEY     Optional: 32+ char encryption key for credentials
+SKIP_MIGRATIONS       Optional: Set to "true" to skip DB migrations on startup
+PORT                  Auto-set by Railway (default 9090)
+```
+
+**Troubleshooting Deployment:**
+
+If healthchecks fail after deploy, see [Startup Diagnosis](docs/STARTUP_DIAGNOSIS.md) for:
+- How to view Runtime Logs (not Build Logs) in Railway Dashboard
+- Diagnostic checklist for common issues
+- Solutions for DATABASE_URL errors, Redis connection failures, migration errors
 
 ## License
 
