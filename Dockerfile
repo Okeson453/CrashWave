@@ -4,14 +4,12 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json ./
-RUN npm install -g npm@11 \
- && (npm ci --omit=dev || npm ci --omit=dev) \
+RUN (npm ci --omit=dev || npm ci --omit=dev) \
  && npm cache clean --force
 
 FROM base AS build
 COPY package.json package-lock.json tsconfig.json tsconfig.build.json ./
-RUN npm install -g npm@11 \
- && (npm ci --include=dev || npm ci --include=dev)
+RUN (npm ci --include=dev || npm ci --include=dev)
 COPY src/ ./src/
 COPY config.yaml ./
 RUN npm run build && npm prune --omit=dev
