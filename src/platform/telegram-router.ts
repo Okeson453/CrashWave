@@ -364,7 +364,7 @@ Send /setup_creds to enter BC.Game credentials.`,
       const instance = await this.tenants.getInstance(user.id);
       const plan = user.planId ? await this.tenants.getPlan(user.planId) : null;
       const lines = [
-        '📊 *Engine Status*',
+        '📊 Engine Status',
         `Plan: ${plan?.name ?? 'None'}`,
         `Account: ${user.status}`,
         `Engine: ${instance?.status ?? 'Not provisioned'}`,
@@ -373,7 +373,7 @@ Send /setup_creds to enter BC.Game credentials.`,
         `P&L today: ${instance?.pnlToday ?? 0}`,
         `Last heartbeat: ${instance?.lastHeartbeat ?? '—'}`,
       ];
-      await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+      await ctx.reply(lines.join('\n'));
     });
 
     this.bot.command('pause', async (ctx) => {
