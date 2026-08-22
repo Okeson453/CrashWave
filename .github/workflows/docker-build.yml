@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "crash-automation/**"
+      - "src/**"
+      - "Dockerfile"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/docker-build.yml"
   workflow_dispatch: {}
 
@@ -45,8 +48,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: ./crash-automation
-          file: ./crash-automation/Dockerfile
+          context: .
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
