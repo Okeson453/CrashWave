@@ -1,18 +1,16 @@
 # Railway / default builder — multi-stage production image with migrations
 FROM mcr.microsoft.com/playwright:v1.46.0-jammy AS base
+ENV NODE_OPTIONS="--dns-result-order=ipv4first"
 WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --fetch-timeout=60000 --fetch-retries=2 --fetch-retry-mintimeout=5000 \
- || (rm -rf node_modules && npm ci --omit=dev --fetch-timeout=60000 --fetch-retries=2)
+RUN npm ci --omit=dev
 RUN npm cache clean --force
 
 FROM base AS build
 COPY package.json package-lock.json tsconfig.json tsconfig.build.json ./
-RUN npm ci --include=dev --fetch-timeout=60000 --fetch-retries=2 --fetch-retry-mintimeout=5000 \
- || (rm -rf node_modules && npm ci --include=dev --fetch-timeout=60000 --fetch-retries=2)
-RUN test -f node_modules/.bin/tsc || npm install typescript@5.9.3 --no-save
+RUN npm ci --include=dev
 COPY src/ ./src/
 COPY config.yaml ./
 RUN npm run build && npm prune --omit=dev
