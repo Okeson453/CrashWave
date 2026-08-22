@@ -3,6 +3,7 @@ FROM mcr.microsoft.com/playwright:v1.46.0-jammy AS base
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && npm install -g npm@11 \
+ && npm config set registry https://registry.npmjs.org/ \
  && rm -rf /var/lib/apt/lists/*
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
