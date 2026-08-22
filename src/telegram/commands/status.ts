@@ -30,19 +30,19 @@ export function createStatusHandlers(
     const modeEmoji = getModeEmoji(mode);
 
     const message = [
-      `${emoji} *System Status*`,
+      `${emoji} System Status`,
       '',
-      `*Mode:* ${modeEmoji} ${mode}`,
-      `*Running:* ${running ? 'Yes' : 'No'}`,
-      `*Session:* \`${sessionId}\``,
-      `*Rounds Observed:* ${roundsObserved}`,
-      `*Errors:* ${errors}`,
-      `*Uptime:* ${uptime}`,
+      `Mode: ${modeEmoji} ${mode}`,
+      `Running: ${running ? 'Yes' : 'No'}`,
+      `Session: ${sessionId}`,
+      `Rounds Observed: ${roundsObserved}`,
+      `Errors: ${errors}`,
+      `Uptime: ${uptime}`,
       '',
-      '_Use /balance, /daily, /health for more details._',
+      'Use /balance, /daily, /health for more details.',
     ].join('\n');
 
-    return { success: true, message, parseMode: 'MarkdownV2' };
+    return { success: true, message };
   });
 
   handlers.set('/balance', async (_ctx: OperatorContext): Promise<CommandResult> => {
