@@ -1,4 +1,4 @@
-# BC.Game Crash Automation & Analytics System
+﻿# BC.Game Crash Automation & Analytics System
 
 A production-grade TypeScript/Node.js automation and analytics platform for observing and participating in BC.Game Crash rounds under a deterministic betting policy.
 
@@ -28,9 +28,18 @@ Telegram Gateway -> Core Orchestrator (Event Bus) -> [
 
 ### Prerequisites
 
+
+## Database Migration Compatibility
+
+**UPDATE**: As of August 2026, TimescaleDB is **no longer required**. All 18 migrations are now compatible with standard PostgreSQL 13+ (including Railway-managed Postgres).
+
+- See [MIGRATION_COMPATIBILITY.md](MIGRATION_COMPATIBILITY.md) for full details on the TimescaleDB removal
+- Previous TimescaleDB hypertable calls replaced with plain Postgres indexes
+- Retention policies managed via scheduled cleanup jobs or application-level DELETE queries
+
 - Node.js >= 20.0.0
 - Docker & Docker Compose
-- PostgreSQL 15+ with TimescaleDB extension
+- PostgreSQL 13+ (standard or TimescaleDB optional for better time-series performance)
 - Redis 7+
 
 ### Installation
@@ -100,11 +109,11 @@ The `secret-files.ts` module automatically resolves both patterns at startup via
 
 ### Secrets Security Checklist
 
-- ✅ Never commit `.env`, `credentials*.json`, or `*.pem` files
-- ✅ Store `TENANT_MASTER_KEY` in secure vault (e.g., Azure Key Vault, AWS Secrets Manager)
-- ✅ Use Docker secret files in production, not environment variables
-- ✅ Rotate `TENANT_MASTER_KEY` periodically (re-encrypt all stored credentials)
-- ✅ Review `src/security/` for audit trail and access control patterns
+- âœ… Never commit `.env`, `credentials*.json`, or `*.pem` files
+- âœ… Store `TENANT_MASTER_KEY` in secure vault (e.g., Azure Key Vault, AWS Secrets Manager)
+- âœ… Use Docker secret files in production, not environment variables
+- âœ… Rotate `TENANT_MASTER_KEY` periodically (re-encrypt all stored credentials)
+- âœ… Review `src/security/` for audit trail and access control patterns
 
 ## npm Dependencies & Registry Configuration
 
@@ -114,7 +123,7 @@ This project uses a **consistent, audited package lock file** (`package-lock.jso
 
 - **Registry**: Always resolves to `https://registry.npmjs.org/` (public npm)
 - **Integrity**: Every resolved package URL is locked with SRI hashes
-- **Retry**: `.npmrc` configured with 5 retries, 10–60s timeout window
+- **Retry**: `.npmrc` configured with 5 retries, 10â€“60s timeout window
 
 **Why this matters:**
 - `npm ci` (used in Docker builds) **always uses exact `resolved` URLs from `package-lock.json`**, ignoring runtime registry config
@@ -127,7 +136,7 @@ This project uses a **consistent, audited package lock file** (`package-lock.jso
 # Update a single package (regenerates lockfile)
 npm install package-name@latest
 
-# Update all (careful — may introduce breaking changes)
+# Update all (careful â€” may introduce breaking changes)
 npm update
 
 # Verify lockfile is clean
@@ -314,7 +323,7 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 - [Operational Runbooks](docs/runbooks.md)
 - [Telegram Commands](docs/telegram-commands.md)
 - [Analytics Mathematics](docs/analytics-math.md)
-- [Startup Diagnosis & Troubleshooting](docs/STARTUP_DIAGNOSIS.md) — Container won't start? Healthcheck failing? Start here.
+- [Startup Diagnosis & Troubleshooting](docs/STARTUP_DIAGNOSIS.md) â€” Container won't start? Healthcheck failing? Start here.
 
 ## Deployment & Production
 
