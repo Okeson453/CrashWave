@@ -4,7 +4,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && npm install -g npm@11 \
  && rm -rf /var/lib/apt/lists/*
-ENV NODE_OPTIONS="--dns-result-order=ipv4first"
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
 FROM base AS deps
