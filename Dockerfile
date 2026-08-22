@@ -1,12 +1,5 @@
 # Railway / default builder — multi-stage production image with migrations
-FROM node:20-bookworm-slim AS base
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
-    libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 \
-    libasound2 libatspi2.0-0 libgtk-3-0 libx11-xcb1 libxcomposite1 \
-    libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2 \
-    fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
+FROM mcr.microsoft.com/playwright:v1.46.0-jammy AS base
 WORKDIR /app
 
 FROM base AS deps
@@ -22,14 +15,11 @@ RUN npm install -g npm@11 \
 COPY src/ ./src/
 COPY config.yaml ./
 RUN npm run build && npm prune --omit=dev
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npx playwright install chromium
 
 FROM base AS production
 ENV NODE_ENV=production \
     PORT=9090 \
-    METRICS_PORT=9090 \
-    PLAYWRIGHT_BROWSERS_PATH=/home/crashapp/.cache/ms-playwright
+    METRICS_PORT=9090
 RUN groupadd -r crashapp && useradd -r -g crashapp -m -d /home/crashapp crashapp
 WORKDIR /app
 
@@ -37,9 +27,6 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
 COPY --from=build /app/config.yaml ./
-COPY --from=build /ms-playwright /home/crashapp/.cache/ms-playwright
-COPY --from=build /app/node_modules/playwright ./node_modules/playwright
-COPY --from=build /app/node_modules/playwright-core ./node_modules/playwright-core
 
 # Schema migrations + runtime scripts
 COPY migrations/ ./migrations/
@@ -47,8 +34,8 @@ COPY scripts/run-migrations.mjs scripts/docker-entrypoint.sh \
      scripts/healthcheck.sh scripts/wait-for-services.sh ./scripts/
 
 RUN chmod +x ./scripts/*.sh ./scripts/run-migrations.mjs \
- && mkdir -p logs /home/crashapp/.cache \
- && chown -R crashapp:crashapp /app /home/crashapp
+ && mkdir -p logs \
+ && chown -R crashapp:crashapp /app
 
 USER crashapp
 EXPOSE 9090 8081
