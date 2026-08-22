@@ -1,7 +1,8 @@
--- Migration 002: Create TimescaleDB hypertables for time-series data
--- Requires TimescaleDB extension
-
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+﻿-- Migration 002: Create time-series tables (plain Postgres, no TimescaleDB)
+-- Replaces TimescaleDB hypertables with simple partitioned tables and indexes.
+-- Retention: Use scheduled cleanup job (e.g., pg_cron) or app-level DELETE:
+--   DELETE FROM multiplier_ticks WHERE time < NOW() - INTERVAL '30 days';
+--   DELETE FROM health_checks_ts WHERE time < NOW() - INTERVAL '90 days';
 
 -- Multiplier ticks (high-frequency time-series)
 CREATE TABLE IF NOT EXISTS multiplier_ticks (
@@ -12,9 +13,7 @@ CREATE TABLE IF NOT EXISTS multiplier_ticks (
     latency_ms INTEGER,
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL
 );
-
--- Convert to hypertable
-SELECT create_hypertable('multiplier_ticks', 'time', if_not_exists => TRUE, migrate_data => TRUE);
+CREATE INDEX IF NOT EXISTS idx_multiplier_ticks_time ON multiplier_ticks (time DESC);
 
 -- Health checks time-series (for granular monitoring)
 CREATE TABLE IF NOT EXISTS health_checks_ts (
@@ -25,9 +24,4 @@ CREATE TABLE IF NOT EXISTS health_checks_ts (
     metric_value NUMERIC(18, 8),
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL
 );
-
-SELECT create_hypertable('health_checks_ts', 'time', if_not_exists => TRUE, migrate_data => TRUE);
-
--- Set retention policies (30 days for ticks, 90 days for health checks)
-SELECT add_retention_policy('multiplier_ticks', INTERVAL '30 days', if_not_exists => TRUE);
-SELECT add_retention_policy('health_checks_ts', INTERVAL '90 days', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_health_checks_ts_time ON health_checks_ts (time DESC);
