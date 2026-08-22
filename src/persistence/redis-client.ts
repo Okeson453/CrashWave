@@ -28,7 +28,7 @@ export function createRedisClient(config: RedisConfig): Redis {
     port: parseInt(url.port || '6379', 10),
     username: url.username ? decodeURIComponent(url.username) : undefined,
     password: config.password || (url.password ? decodeURIComponent(url.password) : undefined),
-    tls: isTls ? {} : undefined,
+    tls: isTls ? { servername: url.hostname } : undefined,
     db: parseInt(url.pathname.replace('/', '') || '0', 10),
     keyPrefix: keyPrefix || undefined,
     commandTimeout: config.commandTimeoutMs ?? 5000,
