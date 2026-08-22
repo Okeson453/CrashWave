@@ -1,4 +1,4 @@
-﻿-- Migration 002: Create time-series tables (plain Postgres, no TimescaleDB)
+-- Migration 002: Create time-series tables (plain Postgres, no TimescaleDB)
 -- Replaces TimescaleDB hypertables with simple partitioned tables and indexes.
 -- Retention: Use scheduled cleanup job (e.g., pg_cron) or app-level DELETE:
 --   DELETE FROM multiplier_ticks WHERE time < NOW() - INTERVAL '30 days';
