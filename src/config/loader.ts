@@ -112,6 +112,10 @@ export function applyTenantEnvOverrides(config: AppConfig): AppConfig {
   const target = process.env.FIXED_TARGET;
   const maxEntries = process.env.MAX_DAILY_ENTRIES;
   const chatId = process.env.TELEGRAM_CHAT_ID;
+  const allowedUserIds = process.env.TELEGRAM_ALLOWED_USER_IDS
+    ?.split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
 
   return {
     ...config,
@@ -130,6 +134,8 @@ export function applyTenantEnvOverrides(config: AppConfig): AppConfig {
       ...config.telegram,
       allowedUserIds: chatId
         ? [chatId]
+        : allowedUserIds?.length
+          ? allowedUserIds
         : config.telegram.allowedUserIds,
     },
   };
