@@ -1,5 +1,9 @@
 # Railway / default builder — multi-stage production image with migrations
 FROM mcr.microsoft.com/playwright:v1.46.0-jammy AS base
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && npm install -g npm@11 \
+ && rm -rf /var/lib/apt/lists/*
 ENV NODE_OPTIONS="--dns-result-order=ipv4first"
 WORKDIR /app
 
@@ -28,7 +32,6 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
 COPY --from=build /app/config.yaml ./
 
-# Schema migrations + runtime scripts
 COPY migrations/ ./migrations/
 COPY scripts/run-migrations.mjs scripts/docker-entrypoint.sh \
      scripts/healthcheck.sh scripts/wait-for-services.sh ./scripts/
