@@ -2,6 +2,16 @@ export * from './types.js';
 export { TenantSecretVault } from './secret-vault.js';
 export type { BcGameCreds } from './secret-vault.js';
 export { TenantManager } from './tenant-manager.js';
+export { TenantResolver } from './tenant-resolver.js';
+export type { ResolvedTenantContext } from './tenant-resolver.js';
+export { TenantRuntime } from './tenant-runtime.js';
+export type {
+  TenantAuthenticateInput,
+  TenantAuthenticateResult,
+  TenantEngineStatus,
+} from './tenant-runtime.js';
+export { TenantRuntimeFactory } from './tenant-runtime-factory.js';
+export type { TenantRuntimeCreator, TenantRuntimeFactoryOptions } from './tenant-runtime-factory.js';
 export {
   DockerContainerOrchestrator,
   ProcessOrchestrator,
