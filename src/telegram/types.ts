@@ -29,12 +29,22 @@ export type ControlCommand =
   | '/resume'
   | '/stop'
   | '/emergencystop'
-  | '/mode';
+  | '/mode'
+  | '/sheath'
+  | '/unsheath';
 
 export type ConfigCommand = '/config';
 export type AnalyticsCommand = '/analytics';
+export type LoginCommand = '/login' | '/login_cancel';
+export type MenuCommand = '/start' | '/menu' | '/help';
 
-export type BotCommand = StatusCommand | ControlCommand | ConfigCommand | AnalyticsCommand;
+export type BotCommand =
+  | StatusCommand
+  | ControlCommand
+  | ConfigCommand
+  | AnalyticsCommand
+  | LoginCommand
+  | MenuCommand;
 
 // ─── Parsed Command ──────────────────────────────────────────────────────────
 
@@ -66,6 +76,12 @@ export type CommandHandler = (ctx: OperatorContext, args: string[]) => Promise<C
 export interface OperatorContext extends Context<Update> {
   operatorId: string;
   isAuthenticated: boolean;
+  /** Platform admin (TELEGRAM_ALLOWED_USER_IDS) */
+  isAdmin?: boolean;
+  /** Resolved tenant UUID (Telegram identity → tenant) */
+  tenantId?: string;
+  telegramUserId?: number;
+  chatId?: number;
   command?: ParsedCommand;
 }
 
