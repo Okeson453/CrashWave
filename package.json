@@ -1,7 +1,7 @@
 {
-  "name": "bc-game-crash-automation",
-  "version": "1.0.0",
-  "description": "Production-grade BC.Game Crash automation and analytics platform",
+  "name": "personal-bc-automation",
+  "version": "1.0.0-personal",
+  "description": "Personal-use BC.Game Crash automation: single-process Node.js bot with Telegram interface and dry-run-by-default virtual ledger.",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
