@@ -8,7 +8,7 @@
 
 import { Telegraf } from 'telegraf';
 import { getLogger } from '../observability/logger';
-import { getRedisClient } from '../persistence/redis-client';
+// import { getRedisClient } from '../persistence/redis-client'; — removed with polling lock
 import { TelegramBotConfig, OperatorContext, BotHealthStatus } from './types';
 import { createAuthMiddleware } from './auth';
 import { createRouter, CommandRouter, RouterDependencies } from './router';
@@ -20,9 +20,6 @@ export interface TelegramGatewayOptions {
 }
 
 export class TelegramGateway {
-  private pollingLockRenewal: NodeJS.Timeout | null = null;
-  private pollingLockKey = 'telegram:polling-lock';
-  private holdsPollingLock = false;
   private bot: Telegraf<OperatorContext> | null = null;
   private readonly config: TelegramBotConfig;
   private health: BotHealthStatus;
@@ -204,62 +201,11 @@ export class TelegramGateway {
   }
 
 
-  private async acquirePollingLock(lockKey: string, ttlMs: number): Promise<boolean> {
-    try {
-      const redis = getRedisClient();
-      const token = `${process.pid}:${Date.now()}`;
-      const result = await redis.set(lockKey, token, 'PX', ttlMs, 'NX');
-      this.holdsPollingLock = result === 'OK';
-      return this.holdsPollingLock;
-    } catch (err) {
-      logger.warn(
-        { component: 'TelegramGateway', error: err instanceof Error ? err.message : String(err) },
-        'Polling lock unavailable — proceeding without distributed lock (single-instance only)'
-      );
-      this.holdsPollingLock = true;
-      return true;
-    }
-  }
-
-  private async renewPollingLock(lockKey: string, ttlMs: number): Promise<void> {
-    if (!this.holdsPollingLock) return;
-    try {
-      const redis = getRedisClient();
-      await redis.pexpire(lockKey, ttlMs);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  private async releasePollingLock(lockKey: string): Promise<void> {
-    if (this.pollingLockRenewal) {
-      clearInterval(this.pollingLockRenewal);
-      this.pollingLockRenewal = null;
-    }
-    if (!this.holdsPollingLock) return;
-    try {
-      await getRedisClient().del(lockKey);
-    } catch {
-      /* ignore */
-    }
-    this.holdsPollingLock = false;
-  }
-
   private async launchPolling(): Promise<void> {
-    const lockKey = this.pollingLockKey;
-    const lockTtlMs = 30_000;
-    const gotLock = await this.acquirePollingLock(lockKey, lockTtlMs);
-    if (!gotLock) {
-      logger.warn(
-        { component: 'TelegramGateway' },
-        'Another instance already holds the Telegram polling lock — skipping launch here'
-      );
-      return;
-    }
-    this.pollingLockRenewal = setInterval(() => {
-      void this.renewPollingLock(lockKey, lockTtlMs);
-    }, lockTtlMs / 2);
-
+    // Personal-use: single-process, no distributed polling lock (spec §3.1).
+    // The 409 retry loop on bot.launch() is preserved (lines 290-310 of
+    // the original) because stale pollers from a previous deploy are still
+    // a real concern for personal use.
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -285,7 +231,6 @@ export class TelegramGateway {
 
   async stop(): Promise<void> {
     if (!this.isRunning || !this.bot) {
-      await this.releasePollingLock(this.pollingLockKey);
       return;
     }
 
@@ -299,7 +244,6 @@ export class TelegramGateway {
       this.bot.stop();
       this.isRunning = false;
       this.health.connected = false;
-      await this.releasePollingLock(this.pollingLockKey);
 
       logger.info(
         {

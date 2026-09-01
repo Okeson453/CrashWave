@@ -44,6 +44,10 @@ import { ValidationWorker } from '../workers/validation/validation-worker';
 import { AnalyticsWorker } from '../workers/analytics/analytics-worker';
 import { randomUUID } from 'crypto';
 import { LiveAlerts } from '../observability/alerts/live-alerts';
+import { RecoveryManager } from '../core/recovery-manager';
+import { UnknownStateRecovery } from '../ledger/unknown-state-recovery';
+import { BalanceReconciliation } from '../ledger/balance-reconciliation';
+import { BalanceTracker } from '../ledger/balance-tracker';
 
 const logger = getLogger();
 
@@ -63,7 +67,7 @@ export interface CompositionContext {
   entryDecisionService: EntryDecisionService;
   riskEngine: RiskEngine;
   sheathMode: SheathMode;
-  recoveryManager: unknown;
+  recoveryManager: RecoveryManager;
   liveAlerts: LiveAlerts;
   workerFleet: WorkerFleet;
   telegramGateway: TelegramGateway | null;
@@ -116,10 +120,23 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     decisionRanker: opportunityRanker as never,
   });
   const sheathMode = new SheathMode();
-  // Personal-use recovery manager: no-op stub (live-mode bet reconciliation
-  // requires the browser pipeline, which is deferred per spec §2.2). Wired
-  // here so the type surface is preserved.
-  const recoveryManager = { runRecovery: async (): Promise<unknown> => ({ recovered: 0, resolved: 0 }) };
+  // Personal-use recovery manager (spec §2.1, §7.2). The advanced Crash
+  // implementation handles three things on boot:
+  //   1. resolve UNKNOWN bets via the round-history heuristic
+  //   2. reconcile virtual/real balance against the DB ledger
+  //   3. resume from any prior halted state
+  // In personal-use dry-run there are no live bets and no DB balance, so
+  // runRecovery() returns an empty result. The wiring is preserved so
+  // that live-mode (when /login + /mode live) gets the full pipeline.
+  const unknownStateRecovery = new UnknownStateRecovery(betRepo, roundRepo, eventBus);
+  const balanceTracker = new BalanceTracker();
+  const balanceReconciliation = new BalanceReconciliation(betRepo, balanceTracker, eventBus);
+  const recoveryManager = new RecoveryManager(
+    unknownStateRecovery,
+    balanceReconciliation,
+    betRepo,
+    eventBus
+  );
 
   // Live alerts: emits health/risk/recovery events onto the bus and can
   // forward to Telegram. Kept from the advanced Crash build (spec §2.8).
@@ -334,6 +351,23 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       dryRunController.start(runtime.sessionId);
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'DryRunController start skipped');
+    }
+    // Run startup reconciliation (spec §7.2). In dry-run this is a no-op
+    // (no UNKNOWN bets, no real balance to reconcile); in live mode it
+    // recovers any stuck bets from the previous session.
+    try {
+      const result = await recoveryManager.runRecovery();
+      logger.info(
+        {
+          component: 'Composition',
+          phase: result.phase,
+          betRecovered: result.betRecovery?.resolved ?? 0,
+          balanceOk: result.balanceReconciliation?.withinTolerance ?? true,
+        },
+        'RecoveryManager.runRecovery completed'
+      );
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'RecoveryManager.runRecovery failed (continuing)');
     }
     // Wire the dry-run signal bridge (spec §1.2, §7.1): subscribes the
     // orchestrator's RoundStarted/RoundCrashed events and routes them
