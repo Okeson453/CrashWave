@@ -43,6 +43,7 @@ import { LearningWorker } from '../workers/learning/learning-worker';
 import { ValidationWorker } from '../workers/validation/validation-worker';
 import { AnalyticsWorker } from '../workers/analytics/analytics-worker';
 import { randomUUID } from 'crypto';
+import { LiveAlerts } from '../observability/alerts/live-alerts';
 
 const logger = getLogger();
 
@@ -63,11 +64,22 @@ export interface CompositionContext {
   riskEngine: RiskEngine;
   sheathMode: SheathMode;
   recoveryManager: unknown;
+  liveAlerts: LiveAlerts;
   workerFleet: WorkerFleet;
   telegramGateway: TelegramGateway | null;
   telegramEnabled: boolean;
   halted: boolean;
   haltReason?: string;
+  /** Read-only runtime view (sessionId, mode, recentTrades, lastRound). */
+  runtime: {
+    sessionId: string;
+    currentMode: AppConfig['system']['mode'];
+    recentTrades: Array<Record<string, unknown>>;
+    lastRound?: Record<string, unknown>;
+    halted: boolean;
+    haltReason?: string;
+    startedAt: number;
+  };
 }
 
 export interface CompositionHandles {
@@ -104,7 +116,14 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     decisionRanker: opportunityRanker as never,
   });
   const sheathMode = new SheathMode();
-  const recoveryManager = { runRecovery: async () => ({} as never) } as never;
+  // Personal-use recovery manager: no-op stub (live-mode bet reconciliation
+  // requires the browser pipeline, which is deferred per spec §2.2). Wired
+  // here so the type surface is preserved.
+  const recoveryManager = { runRecovery: async (): Promise<unknown> => ({ recovered: 0, resolved: 0 }) };
+
+  // Live alerts: emits health/risk/recovery events onto the bus and can
+  // forward to Telegram. Kept from the advanced Crash build (spec §2.8).
+  const liveAlerts = new LiveAlerts(eventBus, { emitToEventBus: true });
 
   // Mutable runtime state tracked by the orchestrator stubs.
   const runtime = {
@@ -288,10 +307,20 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     riskEngine,
     sheathMode,
     recoveryManager,
+    liveAlerts,
     workerFleet,
     telegramGateway,
     telegramEnabled,
     halted: false,
+    runtime: {
+      sessionId: runtime.sessionId,
+      currentMode: runtime.currentMode,
+      recentTrades: runtime.recentTrades,
+      lastRound: runtime.lastRound ?? undefined,
+      halted: runtime.halted,
+      haltReason: runtime.haltReason,
+      startedAt: runtime.startedAt,
+    },
   };
 
   let started = false;
@@ -305,6 +334,42 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       dryRunController.start(runtime.sessionId);
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'DryRunController start skipped');
+    }
+    // Wire the dry-run signal bridge (spec §1.2, §7.1): subscribes the
+    // orchestrator's RoundStarted/RoundCrashed events and routes them
+    // through EntryDecisionService into the dry-run controller.
+    try {
+      const bridge = await import('../core/dry-run/dry-run-bridge.js');
+      const bridgeDeps = {
+        config,
+        dryRunController,
+        riskStateProvider: {
+          buildFresh: async () => ({
+            sessionAuthenticated: true,
+            currentBalance: virtualLedger.getBalance(),
+            consecutiveErrors: 0,
+            consecutiveCashOutFailures: 0,
+          }),
+        } as never,
+        entryDecisionService,
+        sessionId: runtime.sessionId,
+      };
+      // Subscribe to the orchestrator events via the shared event bus.
+      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string } }) => {
+        const roundId = String(ev?.payload?.roundId ?? '');
+        if (roundId) {
+          void bridge.onRoundStartedForDryRun(bridgeDeps, roundId);
+        }
+      });
+      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number } }) => {
+        const p = ev?.payload;
+        if (p?.roundId) {
+          bridge.onRoundCrashedForDryRun(bridgeDeps, p);
+        }
+      });
+      logger.info({ component: 'Composition' }, 'DryRunBridge wired to RoundStarted/RoundCrashed');
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'DryRunBridge wire skipped');
     }
     await workerFleet.startAll();
     if (telegramGateway && telegramEnabled) {
@@ -335,4 +400,20 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   }
 
   return { ctx, start, stop };
+}
+
+/**
+ * Global composition reference for runtime queries (e.g. /health, /state,
+ * debug logs). Single-process; the personal-use build does not need a
+ * Redis-backed global, but downstream code (monolith.ts, tests) expects
+ * this hook to exist.
+ */
+let globalComposition: CompositionHandles | null = null;
+
+export function setGlobalComposition(handles: CompositionHandles | null): void {
+  globalComposition = handles;
+}
+
+export function getGlobalComposition(): CompositionHandles | null {
+  return globalComposition;
 }
