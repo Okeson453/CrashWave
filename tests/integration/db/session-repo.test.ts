@@ -2,7 +2,14 @@ import { Pool } from 'pg';
 import { SessionRepository } from '../../../src/persistence/repositories/session-repo';
 import { getPool, closePool, createPool } from '../../../src/persistence/client';
 
-describe('SessionRepository Integration', () => {
+// These tests require a running PostgreSQL instance. In CI and personal
+// dev environments without a DB available, they are skipped to keep
+// the unit/simulation suite fast. Set INTEGRATION_DB=1 to enable.
+const dbEnabled = process.env.INTEGRATION_DB === '1' || process.env.RUN_DB_TESTS === '1';
+
+const d = dbEnabled ? describe : describe.skip;
+
+d('SessionRepository Integration', () => {
   let pool: Pool;
   let repo: SessionRepository;
 

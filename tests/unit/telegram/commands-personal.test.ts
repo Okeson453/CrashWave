@@ -116,7 +116,7 @@ describe('personal-use telegram commands (output)', () => {
 
 describe('personal-use telegram control command (live confirmation)', () => {
   it('/mode live issues a token; /mode confirm activates; /mode live again issues a new one', async () => {
-    const h = createControlHandlers({});
+    const h = createControlHandlers({ setSystemMode: async () => true });
     const r1 = await h.get('/mode')!(makeCtx() as never, ['live']);
     expect(r1.success).toBe(true);
     expect(r1.message).toMatch(/confirm/i);

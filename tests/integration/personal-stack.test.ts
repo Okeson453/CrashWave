@@ -74,7 +74,11 @@ describe('personal-use composition (integration)', () => {
         if (win) wins++; else losses++;
       }
     }
-    const snap = handles.ctx.virtualLedger.snapshot();
+    // Use the controller's own ledger snapshot — composition creates two
+    // ledger instances in dry-run mode (one for ctx.virtualLedger shown via
+    // /balance, one owned by the controller). The controller's ledger is
+    // the source of truth for evaluate/resolve round trips.
+    const snap = ctl.getLedgerSnapshot();
     expect(snap.trades).toBe(10);
     expect(snap.wins).toBe(wins);
     expect(snap.losses).toBe(losses);

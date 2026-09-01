@@ -26,11 +26,13 @@ describe('dry-run personal-use (core/dry-run)', () => {
 
   beforeEach(() => {
     ledger = new VirtualTradeLedger(10000);
+    // Threshold at 0.5 so a 0.9 default signal qualifies and a 0.1 override
+    // is rejected.
     ctl = new DryRunController({
       stake: 100,
       target: 1.30,
-      minProbability: 0.0,
-      minConfidence: 0.0,
+      minProbability: 0.5,
+      minConfidence: 0.5,
     });
     // @ts-expect-error test injection (the controller normally owns its ledger)
     ctl.ledger = ledger;

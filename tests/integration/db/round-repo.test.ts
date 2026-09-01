@@ -2,7 +2,14 @@ import { Pool } from 'pg';
 import { RoundRepository } from '../../../src/persistence/repositories/round-repo';
 import { getPool, closePool, createPool } from '../../../src/persistence/client';
 
-describe('RoundRepository Integration', () => {
+// These tests require a running PostgreSQL instance. In CI and personal
+// dev environments without a DB available, they are skipped to keep
+// the unit/simulation suite fast. Set INTEGRATION_DB=1 to enable.
+const dbEnabled = process.env.INTEGRATION_DB === '1' || process.env.RUN_DB_TESTS === '1';
+
+const d = dbEnabled ? describe : describe.skip;
+
+d('RoundRepository Integration', () => {
   let pool: Pool;
   let repo: RoundRepository;
   let testSessionId: string;
