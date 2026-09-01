@@ -16,6 +16,7 @@ import { composeApplication, CompositionHandles } from './app/composition';
 import { startControlPlane, ControlPlaneHandles } from './platform/control-plane';
 import { startHeartbeatLoop } from './platform/heartbeat';
 import { applyTenantDbContext } from './platform/tenant-context';
+import { installCrashHandlers } from './utils/crash-handler';
 
 let isShuttingDown = false;
 let composition: CompositionHandles | null = null;
@@ -26,6 +27,8 @@ async function bootstrap(): Promise<void> {
   try {
     const config = validateConfig();
     createLogger(config.system.serviceName, config.system.logLevel);
+    // register crash handlers early so they can use the logger
+    installCrashHandlers();
     const logger = getLogger();
     logger.info({ component: 'Bootstrap' }, 'Starting BC.Game Crash Automation & Analytics System');
 
