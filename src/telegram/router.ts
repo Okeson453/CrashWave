@@ -16,7 +16,11 @@ import {
 } from './types';
 import { createControlHandlers } from './commands/control';
 import { createConfigHandlers } from './commands/config';
-// start, status, login, analytics removed in this refactor pass; personal-use commands live in control/config.
+import { createStartHandlers } from './commands/start';
+import { createStatusHandlers } from './commands/status';
+import { createAnalyticsHandlers } from './commands/analytics';
+import { createLoginHandlers, handleLoginConversationText } from './commands/login';
+// Tenant removed for personal use.
 
 const logger = getLogger();
 
@@ -82,8 +86,12 @@ export class CommandRouter {
         return next();
       }
 
-      // Active /login conversation removed in personal-use refactor; replies are no-ops.
+      // Active /login conversation (email/password replies — not commands).
+      // In dry-run the conversation is a no-op; the operator can use /login
+      // before /mode live.
       if (!text.startsWith('/')) {
+        const handled = await handleLoginConversationText(ctx, text, this.dependencies);
+        if (handled) return;
         return next();
       }
 
@@ -249,6 +257,18 @@ export class CommandRouter {
   private rebuildHandlers(): void {
     this.handlers.clear();
 
+    // /start, /menu, /help
+    const startHandlers = createStartHandlers(this.dependencies);
+    startHandlers.forEach((handler, command) => {
+      this.handlers.set(command, handler);
+    });
+
+    // Status commands (read-only views)
+    const statusHandlers = createStatusHandlers(this.dependencies);
+    statusHandlers.forEach((handler, command) => {
+      this.handlers.set(command, handler);
+    });
+
     // Control commands (the operator's primary interface)
     const controlHandlers = createControlHandlers(this.dependencies);
     controlHandlers.forEach((handler, command) => {
@@ -260,8 +280,18 @@ export class CommandRouter {
     configHandlers.forEach((handler, command) => {
       this.handlers.set(command, handler);
     });
-    // /status, /analytics, /login, /start are wired via the same handler set in
-    // personal-use; if a handler factory above is unavailable, the command is a no-op.
+
+    // /analytics
+    const analyticsHandlers = createAnalyticsHandlers(this.dependencies);
+    analyticsHandlers.forEach((handler, command) => {
+      this.handlers.set(command, handler);
+    });
+
+    // /login, /login_cancel (and conversation interceptor above)
+    const loginHandlers = createLoginHandlers(this.dependencies);
+    loginHandlers.forEach((handler, command) => {
+      this.handlers.set(command, handler);
+    });
   }
 
   /** Expose deps for login conversation middleware */

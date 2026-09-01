@@ -85,9 +85,10 @@ export class BetRepository {
   }
 
   async create(input: CreateBetInput): Promise<BetRecord> {
+    // Personal-use: bets table doesn't have tenant_id; ignore input.tenantId.
     const query = `
-      INSERT INTO bets (tenant_id, session_id, round_id, daily_key, stake, cash_out_target, state, balance_before)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO bets (session_id, round_id, daily_key, stake, cash_out_target, state, balance_before)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
     `;
     try {
@@ -95,21 +96,33 @@ export class BetRepository {
       try {
         await client.query('BEGIN');
         const result = await client.query(query, [
-          input.tenantId ?? null, input.sessionId ?? null, input.roundId ?? null, input.dailyKey, input.stake,
+          input.sessionId ?? null, input.roundId ?? null, input.dailyKey, input.stake,
           input.cashOutTarget, input.state ?? 'PENDING', input.balanceBefore ?? null,
         ]);
         const record = this.mapRow(result.rows[0]);
-        const eventId = randomUUID();
-        await client.query(
-          `INSERT INTO financial_ledger_events
-            (id, bet_id, tenant_id, event_type, amount, evidence, correlation_id)
-           VALUES ($1, $2, NULLIF(current_setting('app.tenant_id', true), '')::uuid, 'BET_INTENDED', $3, $4::jsonb, $2)`,
-          [eventId, record.id, record.stake, JSON.stringify({ state: record.state, target: record.cashOutTarget })]
-        );
-        await client.query(
-          `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
-          [eventId, 'EntryApproved', JSON.stringify({ betId: record.id, roundId: record.roundId, stake: record.stake, target: record.cashOutTarget }), record.id, 'BetRepository']
-        );
+        // Personal-use: financial_ledger_events / outbox are not part of the
+        // personal schema (they live in 013/014/017 which are in _deprecated/).
+        // Best-effort: skip silently if those tables don't exist.
+        try {
+          const eventId = randomUUID();
+          await client.query(
+            `INSERT INTO financial_ledger_events
+              (id, bet_id, event_type, amount, evidence, correlation_id)
+             VALUES ($1, $2, 'BET_INTENDED', $3, $4::jsonb, $2)`,
+            [eventId, record.id, record.stake, JSON.stringify({ state: record.state, target: record.cashOutTarget })]
+          );
+        } catch {
+          // table may not exist; ignore in personal-use
+        }
+        try {
+          const eventId = randomUUID();
+          await client.query(
+            `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
+            [eventId, 'EntryApproved', JSON.stringify({ betId: record.id, roundId: record.roundId, stake: record.stake, target: record.cashOutTarget }), record.id, 'BetRepository']
+          );
+        } catch {
+          // function may not exist; ignore
+        }
         await client.query('COMMIT');
         this.logger.info({ component: 'BetRepository', betId: record.id, state: record.state }, 'Bet created transactionally');
         return record;
@@ -181,9 +194,11 @@ export class BetRepository {
   }
 
   async findByUser(userId: string, opts: { limit?: number; status?: string; cursor?: string } = {}): Promise<BetRecord[]> {
+    // Personal-use: tenant_id column dropped; match on session_id (which is a
+    // surrogate for "this operator" in single-tenant mode).
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
     const params: unknown[] = [userId];
-    const filters = ['tenant_id = $1'];
+    const filters = ['session_id = $1'];
     if (opts.status) { params.push(opts.status.toUpperCase()); filters.push(`state = $${params.length}`); }
     if (opts.cursor) { params.push(opts.cursor); filters.push(`id < $${params.length}`); }
     params.push(limit);
@@ -328,23 +343,33 @@ export class BetRepository {
         const record = this.mapRow(result.rows[0]);
 
         if (input.state && input.state !== previous.state) {
-          const eventId = randomUUID();
-          const eventType = this.financialEventType(input.state);
-          await client.query(
-            `INSERT INTO financial_ledger_events
-              (id, bet_id, tenant_id, event_type, amount, multiplier, evidence, correlation_id)
-             VALUES ($1, $2, NULLIF(current_setting('app.tenant_id', true), '')::uuid, $3, $4, $5, $6::jsonb, $7)`,
-            [
-              eventId, id, eventType, record.pnl, record.confirmedCashOutMultiplier,
-              JSON.stringify({ previousState: previous.state, newState: record.state, failureReason: record.failureReason, externalReference: input.externalReference ?? null, settlementSource: input.settlementSource ?? null, settlementEvidence: input.settlementEvidence ?? {} }), id,
-            ]
-          );
+          // Personal-use: financial_ledger_events / outbox are best-effort; the
+          // tenant_id column was removed from the personal schema.
+          try {
+            const eventId = randomUUID();
+            const eventType = this.financialEventType(input.state);
+            await client.query(
+              `INSERT INTO financial_ledger_events
+                (id, bet_id, event_type, amount, multiplier, evidence, correlation_id)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $2)`,
+              [
+                eventId, id, eventType, record.pnl, record.confirmedCashOutMultiplier,
+                JSON.stringify({ previousState: previous.state, newState: record.state, failureReason: record.failureReason, externalReference: input.externalReference ?? null, settlementSource: input.settlementSource ?? null, settlementEvidence: input.settlementEvidence ?? {} }),
+              ]
+            );
+          } catch {
+            // financial_ledger_events table not in personal-use schema
+          }
           const systemEvent = this.systemEventForState(input.state);
           if (systemEvent) {
-            await client.query(
-              `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
-              [eventId, systemEvent, JSON.stringify({ betId: id, previousState: previous.state, state: record.state, pnl: record.pnl, multiplier: record.confirmedCashOutMultiplier }), id, 'BetRepository']
-            );
+            try {
+              await client.query(
+                `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
+                [randomUUID(), systemEvent, JSON.stringify({ betId: id, newState: record.state }), id, 'BetRepository']
+              );
+            } catch {
+              // enqueue_outbox_event not in personal-use schema
+            }
           }
         }
 

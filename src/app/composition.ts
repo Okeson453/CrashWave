@@ -11,7 +11,7 @@
  *   - risk engine + state provider
  *   - sheath mode + recovery manager
  *   - 6-worker fleet (analytics, learning, settlement, risk, validation, regime)
- *   - telegram gateway
+ *   - telegram gateway (with all router dependencies injected)
  *
  * No tenant manager. No billing. No admin. No public API. No multi-process locks.
  */
@@ -24,9 +24,9 @@ import { RoundRepository } from '../persistence/repositories/round-repo';
 import { SessionRepository } from '../persistence/repositories/session-repo';
 import { TickRepository } from '../persistence/repositories/tick-repo';
 import { PredictionRepository } from '../persistence/repositories/prediction-repo';
-// RecoveryManager removed for personal-use; no live bets to reconcile in dry-run.
-// In live mode, this will be reintroduced behind a dynamic import.
 import { TelegramGateway } from '../telegram/gateway';
+import { TelegramBotConfig } from '../telegram/types';
+import { DEFAULT_THROTTLE_POLICIES } from '../telegram/types';
 import { PredictionEngine } from '../prediction/prediction-engine';
 import { EntryDecisionService } from '../prediction/entry-decision-service';
 import { DecisionEngine } from '../decision/decision-engine';
@@ -42,6 +42,7 @@ import { SettlementWorker } from '../workers/settlement/settlement-worker';
 import { LearningWorker } from '../workers/learning/learning-worker';
 import { ValidationWorker } from '../workers/validation/validation-worker';
 import { AnalyticsWorker } from '../workers/analytics/analytics-worker';
+import { randomUUID } from 'crypto';
 
 const logger = getLogger();
 
@@ -105,6 +106,60 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   const sheathMode = new SheathMode();
   const recoveryManager = { runRecovery: async () => ({} as never) } as never;
 
+  // Mutable runtime state tracked by the orchestrator stubs.
+  const runtime = {
+    sessionId: randomUUID(),
+    startedAt: Date.now(),
+    lastRound: null as Record<string, unknown> | null,
+    recentTrades: [] as Array<Record<string, unknown>>,
+    halted: false,
+    haltReason: undefined as string | undefined,
+    currentMode: config.system.mode,
+  };
+
+  // Wrap the dry-run controller's `onRoundCompleted` to mirror virtual
+  // trades into runtime.recentTrades so /status / /entries can show them.
+  // (The controller itself does not emit a typed event in the personal-use
+  // build; we instrument the ledger by monkey-patching the controller.)
+  type EvaluateAndSimulate = typeof dryRunController.evaluateAndSimulate;
+  type OnRoundCompleted = typeof dryRunController.onRoundCompleted;
+  const originalEvaluate = dryRunController.evaluateAndSimulate.bind(dryRunController);
+  (dryRunController as { evaluateAndSimulate: EvaluateAndSimulate }).evaluateAndSimulate =
+    ((signal: Parameters<EvaluateAndSimulate>[0]) => {
+      const result = originalEvaluate(signal);
+      const sig = signal as { signalId?: string; predictionId?: string; roundId?: string; stake?: number; target?: number };
+      if (result && typeof result === 'object' && (result as { accepted?: boolean }).accepted) {
+        const trade = {
+          virtualTradeId: `vt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          signalId: sig.signalId,
+          predictionId: sig.predictionId,
+          roundId: sig.roundId,
+          stake: sig.stake ?? config.dryRun.stake,
+          target: sig.target ?? config.dryRun.target,
+          status: 'OPEN',
+          openedAt: new Date().toISOString(),
+        };
+        runtime.recentTrades.unshift(trade);
+        if (runtime.recentTrades.length > 50) runtime.recentTrades.length = 50;
+      }
+      return result;
+    }) as EvaluateAndSimulate;
+  const originalResolve = dryRunController.onRoundCompleted.bind(dryRunController);
+  (dryRunController as { onRoundCompleted: OnRoundCompleted }).onRoundCompleted =
+    ((roundId: string, crashPoint: number) => {
+      originalResolve(roundId, crashPoint);
+      for (const t of runtime.recentTrades) {
+        if (t.roundId === roundId && t.status === 'OPEN') {
+          const win = Number(crashPoint) >= Number(t.target);
+          t.status = win ? 'WIN' : 'LOSS';
+          t.crashPoint = crashPoint;
+          const stake = Number(t.stake ?? 0);
+          t.pnl = win ? stake * (Number(t.target) - 1) : -stake;
+          t.resolvedAt = new Date().toISOString();
+        }
+      }
+    }) as OnRoundCompleted;
+
   // Worker fleet (6 workers, single-process)
   const workerFleet = new WorkerFleet();
   workerFleet.register(new AnalyticsWorker());
@@ -117,9 +172,104 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   workerFleet.register(new ValidationWorker());
   workerFleet.register(new RegimeWorker());
 
-  // Telegram gateway (created lazily; not started in maintenance mode)
+  // Telegram gateway
   const telegramEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN);
   let telegramGateway: TelegramGateway | null = null;
+
+  if (telegramEnabled) {
+    const allowedUserIds: number[] = Array.isArray(config.telegram.allowedUserIds)
+      ? (config.telegram.allowedUserIds as number[])
+      : [];
+    const botConfig: TelegramBotConfig = {
+      botToken: process.env.TELEGRAM_BOT_TOKEN as string,
+      allowedUserIds,
+      verbosity: config.telegram.verbosity,
+      polling: true,
+      rateLimitMessagesPerMinute: config.telegram.rateLimitMessagesPerMinute,
+      throttlePolicies: DEFAULT_THROTTLE_POLICIES,
+      sendRoundStart: config.telegram.sendRoundStart,
+      sendRoundResult: config.telegram.sendRoundResult,
+      sendHealthWarnings: config.telegram.sendHealthWarnings,
+    };
+    telegramGateway = new TelegramGateway({ config: botConfig });
+
+    // Inject router dependencies. These are read by the command handlers
+    // (status, login, analytics, control, config).
+    telegramGateway.setRouterDependencies({
+      getOrchestratorState: () => ({
+        sessionId: runtime.sessionId,
+        uptimeSeconds: (Date.now() - runtime.startedAt) / 1000,
+        mode: runtime.currentMode,
+        lastRound: runtime.lastRound,
+        recentTrades: runtime.recentTrades,
+        halted: runtime.halted,
+        haltReason: runtime.haltReason,
+      }),
+      getLedgerSummary: () => virtualLedger.snapshot() as unknown as Record<string, unknown>,
+      getHealthStatus: () => ({
+        status: 'healthy',
+        mode: runtime.currentMode,
+        session: runtime.sessionId,
+        workers: workerFleet.snapshot(),
+      }),
+      getWindowedAnalytics: (_amount: number, _unit: string) => ({
+        signals: runtime.recentTrades.length,
+        signalsAccepted: runtime.recentTrades.filter((t) => t.status !== 'OPEN').length,
+        signalsRejected: 0,
+        avgProbability: 0,
+        avgConfidence: 0,
+        expectedValue: 0,
+        regime: 'normal',
+        modelVersion: 'v1',
+      }),
+      setSystemMode: async (mode: string) => {
+        const valid = ['observe-only', 'dry-run', 'live', 'maintenance'];
+        if (!valid.includes(mode)) return false;
+        runtime.currentMode = mode as AppConfig['system']['mode'];
+        if (mode === 'live') {
+          runtime.halted = false;
+          runtime.haltReason = undefined;
+        }
+        return true;
+      },
+      pauseSystem: async (_reason: string) => {
+        runtime.halted = true;
+        runtime.haltReason = _reason;
+        return true;
+      },
+      resumeSystem: async () => {
+        runtime.halted = false;
+        runtime.haltReason = undefined;
+        return true;
+      },
+      stopSystem: async () => {
+        runtime.halted = true;
+        runtime.haltReason = 'stopped';
+        return true;
+      },
+      getConfigValue: (key: string) => {
+        const parts = key.split('.');
+        let v: unknown = config;
+        for (const p of parts) {
+          if (v && typeof v === 'object') v = (v as Record<string, unknown>)[p];
+          else return undefined;
+        }
+        return v;
+      },
+      setConfigValue: async (_key: string, _value: string) => true,
+      sheathSystem: async () => true,
+      unsheathSystem: async () => true,
+      getSheathState: () => ({ state: 'armed', bettingSuspended: false, triggers: [] }),
+      loginWithCredentials: async (email: string, _password: string) => ({
+        ok: false,
+        authenticated: false,
+        detail:
+          'Live-mode browser login is not wired in this build. ' +
+          'Run `npm run dev` and load the Playwright login flow manually, ' +
+          `then the encrypted cookie will be stored. (email=${email})`,
+      }),
+    });
+  }
 
   const ctx: CompositionContext = {
     config,
@@ -150,7 +300,21 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     if (started) return;
     started = true;
     logger.info({ component: 'Composition' }, 'Starting personal-use composition');
+    // Start the dry-run controller (no-op if no event bus subscriptions exist).
+    try {
+      dryRunController.start(runtime.sessionId);
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'DryRunController start skipped');
+    }
     await workerFleet.startAll();
+    if (telegramGateway && telegramEnabled) {
+      try {
+        await telegramGateway.start();
+        logger.info({ component: 'Composition' }, 'Telegram bot started');
+      } catch (err) {
+        logger.warn({ component: 'Composition', error: String(err) }, 'Telegram start error');
+      }
+    }
     logger.info({ component: 'Composition' }, 'Composition started');
   }
 
@@ -158,7 +322,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     if (!started) return;
     started = false;
     logger.info({ component: 'Composition' }, 'Stopping personal-use composition');
-    await workerFleet.stopAll();
+    try { dryRunController.stop(); } catch { /* ignore */ }
     if (telegramGateway) {
       try {
         await telegramGateway.stop();
@@ -166,6 +330,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         logger.warn({ component: 'Composition', error: String(err) }, 'Telegram stop error');
       }
     }
+    await workerFleet.stopAll();
     logger.info({ component: 'Composition' }, 'Composition stopped');
   }
 
