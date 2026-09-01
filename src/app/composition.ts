@@ -24,7 +24,8 @@ import { RoundRepository } from '../persistence/repositories/round-repo';
 import { SessionRepository } from '../persistence/repositories/session-repo';
 import { TickRepository } from '../persistence/repositories/tick-repo';
 import { PredictionRepository } from '../persistence/repositories/prediction-repo';
-import { RecoveryManager } from '../core/recovery-manager';
+// RecoveryManager removed for personal-use; no live bets to reconcile in dry-run.
+// In live mode, this will be reintroduced behind a dynamic import.
 import { TelegramGateway } from '../telegram/gateway';
 import { PredictionEngine } from '../prediction/prediction-engine';
 import { EntryDecisionService } from '../prediction/entry-decision-service';
@@ -60,7 +61,7 @@ export interface CompositionContext {
   entryDecisionService: EntryDecisionService;
   riskEngine: RiskEngine;
   sheathMode: SheathMode;
-  recoveryManager: RecoveryManager;
+  recoveryManager: unknown;
   workerFleet: WorkerFleet;
   telegramGateway: TelegramGateway | null;
   telegramEnabled: boolean;
@@ -102,7 +103,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     decisionRanker: opportunityRanker as never,
   });
   const sheathMode = new SheathMode();
-  const recoveryManager: RecoveryManager = { runRecovery: async () => ({} as never) } as unknown as RecoveryManager;
+  const recoveryManager = { runRecovery: async () => ({} as never) } as never;
 
   // Worker fleet (6 workers, single-process)
   const workerFleet = new WorkerFleet();
@@ -150,7 +151,6 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     started = true;
     logger.info({ component: 'Composition' }, 'Starting personal-use composition');
     await workerFleet.startAll();
-    await recoveryManager.runRecovery();
     logger.info({ component: 'Composition' }, 'Composition started');
   }
 
