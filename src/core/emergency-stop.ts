@@ -1,8 +1,6 @@
 import { EventBus, getEventBus } from './event-bus/bus';
 import { getLogger } from '../observability/logger';
 import { BetRepository } from '../persistence/repositories/bet-repo';
-import { LiveBetExecutor } from '../betting/live-executor';
-import { LiveCashOutExecutor } from '../betting/live-cashout';
 import { DOM_SELECTORS } from '../game/constants';
 
 
@@ -106,8 +104,8 @@ export class EmergencyStop {
    */
   async trigger(
     reason: string,
-    liveExecutor?: LiveBetExecutor,
-    cashOutExecutor?: LiveCashOutExecutor
+    liveExecutor?: unknown,
+    cashOutExecutor?: unknown
   ): Promise<EmergencyStopResult> {
     const timestamp = new Date().toISOString();
 
@@ -141,12 +139,12 @@ export class EmergencyStop {
     let preservedState = false;
 
     try {
-      // 1. Halt executors
-      if (liveExecutor) {
-        liveExecutor.stop();
+      // 1. Halt executors (no-ops in personal-use; live executors removed)
+      if (liveExecutor && typeof (liveExecutor as { stop?: () => void }).stop === 'function') {
+        (liveExecutor as { stop: () => void }).stop();
       }
-      if (cashOutExecutor) {
-        cashOutExecutor.stop();
+      if (cashOutExecutor && typeof (cashOutExecutor as { stop?: () => void }).stop === 'function') {
+        (cashOutExecutor as { stop: () => void }).stop();
       }
       haltedExecutors = true;
       this.logger.info({ component: 'EmergencyStop' }, 'Executors halted');

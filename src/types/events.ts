@@ -24,6 +24,15 @@ export type SystemEventType =
   | 'RoundCrashed'
   | 'EntryApproved'
   | 'EntryRejected'
+  | 'ExecutionAuthorized'
+  | 'PredictionGenerated'
+  | 'SignalDetected'
+  | 'SignalConfirmed'
+  | 'SignalRejected'
+  | 'OpportunityScored'
+  | 'RegimeChanged'
+  | 'BetSettled'
+  | 'SentimentAlert'
   | 'BetPlaced'
   | 'BetFailed'
   | 'CashOutRequested'
@@ -37,7 +46,16 @@ export type SystemEventType =
   | 'SystemPaused'
   | 'SystemResumed'
   | 'CriticalError'
-  | 'OperatorCommandReceived';
+  | 'OperatorCommandReceived'
+  | 'PredictionStatePublished'
+  | 'ExecutionAuthorizationExpired'
+  | 'round:start'
+  | 'tick'
+  | 'round:end'
+  | 'countdown'
+  | 'bet:placed'
+  | 'bet:cashed-out'
+  | 'balance:updated';
 
 export interface TypedEvent<T = unknown> extends BaseEvent {
   payload: T;

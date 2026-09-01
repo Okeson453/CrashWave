@@ -3,6 +3,7 @@
  * Uses empirical conditional rates from features — deterministic, train-free.
  */
 
+import { CURRENT_FEATURE_VERSION } from '../features/feature-meta.js';
 import { FeatureVector, ThresholdTarget, ModelIdentity, PredictionOutput, Regime, Dataset } from '../types.js';
 import { randomUUID } from 'crypto';
 
@@ -28,7 +29,7 @@ export class BaselineStatisticalModel implements PredictiveModel {
   readonly identity: ModelIdentity = {
     name: 'baseline-statistical',
     version: '1.0.0',
-    featureVersion: 'fv-1.0.0',
+    featureVersion: CURRENT_FEATURE_VERSION,
     targetVersion: 'tv-1.0.0',
   };
 

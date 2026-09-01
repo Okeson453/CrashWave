@@ -58,6 +58,9 @@ const MODEL_NAMES = [
   'ConditionalFrequencyModel',
   'RegimeAdjustedModel',
   'StreakAwareModel',
+  'MomentumReversionModel',
+  'ShortWindowBayesianModel',
+  'VolatilityAdjustedModel',
 ] as const;
 
 export type OnlineModelName = (typeof MODEL_NAMES)[number];

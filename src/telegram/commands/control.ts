@@ -98,6 +98,44 @@ export function createControlHandlers(
     };
   });
 
+  // V1.1 Sheath Mode commands
+  handlers.set('/sheath', async (ctx: OperatorContext): Promise<CommandResult> => {
+    logger.info({ component: 'ControlCommand', userId: ctx.from?.id }, 'Operator requested sheath');
+    const success = (await deps.sheathSystem?.()) ?? false;
+    if (success) {
+      const snap = deps.getSheathState?.();
+      return {
+        success: true,
+        message: `🛡️ *Sheath Mode Active*\n\nState: \`${escapeMarkdown(snap?.state ?? 'SHEATH_ACTIVE')}\`\nBetting suspended\\. Intelligence, monitoring, and learning continue\\.\n\nUse /unsheath to begin recovery validation\\.`,
+        parseMode: 'MarkdownV2',
+      };
+    }
+    return {
+      success: false,
+      message: '⚠️ *Sheath Failed*\n\nUnable to enter sheath mode\\.',
+      parseMode: 'MarkdownV2',
+    };
+  });
+
+  handlers.set('/unsheath', async (ctx: OperatorContext): Promise<CommandResult> => {
+    logger.info({ component: 'ControlCommand', userId: ctx.from?.id }, 'Operator requested unsheath');
+    const success = (await deps.unsheathSystem?.()) ?? false;
+    if (success) {
+      const snap = deps.getSheathState?.();
+      return {
+        success: true,
+        message: `🔄 *Sheath Recovery Started*\n\nState: \`${escapeMarkdown(snap?.state ?? 'SHEATH_RECOVERING')}\`\nBetting remains suspended until recovery validation passes\\.`,
+        parseMode: 'MarkdownV2',
+      };
+    }
+    return {
+      success: false,
+      message: '⚠️ *Unsheath Failed*\n\nUnable to start recovery\\. Check current sheath state with /status\\.',
+      parseMode: 'MarkdownV2',
+    };
+  });
+
+
   handlers.set('/emergencystop', async (ctx: OperatorContext, args: string[]): Promise<CommandResult> => {
     const reason = args.join(' ').trim() || 'EMERGENCY STOP triggered by operator';
     logger.warn({ component: 'ControlCommand', userId: ctx.from?.id, reason }, '!!! EMERGENCY STOP TRIGGERED !!!');

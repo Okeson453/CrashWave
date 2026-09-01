@@ -1,8 +1,8 @@
 /**
- * Telegram Operator Interface — Authentication Middleware
+ * Telegram identity + tenant context middleware.
  *
- * Allowlist-based authentication, private-chat enforcement,
- * and spoofed-ID rejection. All operator actions are gated here.
+ * TELEGRAM_ALLOWED_USER_IDS / allowedUserIds = platform administrators only.
+ * Any valid Telegram private-chat user is an identity; tenant is resolved downstream.
  */
 
 import { MiddlewareFn } from 'telegraf';
@@ -12,33 +12,43 @@ import { OperatorContext } from './types';
 const logger = getLogger();
 
 export interface AuthOptions {
-  allowedUserIds: number[];
+  /** Platform admin Telegram user IDs (privileged ops only — not a tenant gate) */
+  adminUserIds: number[];
   enforcePrivateChat: boolean;
+  /**
+   * @deprecated Use adminUserIds. Kept for call-site compatibility.
+   */
+  allowedUserIds?: number[];
 }
 
 /**
- * Creates authentication middleware that:
- * 1. Rejects messages from group chats (if enforcePrivateChat)
- * 2. Rejects users not in the allowlist
- * 3. Rejects spoofed/forged IDs by validating the from.id
- * 4. Attaches operator context for downstream handlers
+ * Level 1: Telegram identity
+ * - private chat only (optional)
+ * - valid positive Telegram user id
+ * - attach telegramUserId / chatId / isAdmin
+ * Does NOT reject unknown users (tenant provisioning happens on /start).
  */
 export function createAuthMiddleware(options: AuthOptions): MiddlewareFn<OperatorContext> {
-  const allowedSet = new Set(options.allowedUserIds);
-  // P2.2: empty allowlist is fail-closed — no commands accepted
-  if (allowedSet.size === 0) {
-    logger.warn(
+  const adminIds = options.adminUserIds?.length
+    ? options.adminUserIds
+    : options.allowedUserIds ?? [];
+  const adminSet = new Set(adminIds);
+
+  if (adminSet.size === 0) {
+    logger.info(
       { component: 'TelegramAuth' },
-      'allowedUserIds is empty — all Telegram commands will be rejected (fail-closed)'
+      'No admin user IDs configured — all users are tenants; no platform-admin privileges'
     );
   }
 
   return async (ctx, next) => {
-    // Initialize operator context
     ctx.isAuthenticated = false;
     ctx.operatorId = 'anonymous';
+    ctx.isAdmin = false;
+    ctx.tenantId = undefined;
+    ctx.telegramUserId = undefined;
+    ctx.chatId = undefined;
 
-    // ─── Private Chat Enforcement ────────────────────────────────────────────
     if (options.enforcePrivateChat) {
       const chatType = ctx.chat?.type;
       if (chatType !== 'private') {
@@ -58,19 +68,12 @@ export function createAuthMiddleware(options: AuthOptions): MiddlewareFn<Operato
       }
     }
 
-    // ─── User Validation ─────────────────────────────────────────────────────
     const user = ctx.from;
     if (!user) {
-      logger.warn(
-        { component: 'TelegramAuth' },
-        'Rejected message with no user information'
-      );
       await ctx.reply('❌ Unable to identify sender.', { parse_mode: 'Markdown' });
       return;
     }
 
-    // ─── Spoofed ID Detection ────────────────────────────────────────────────
-    // Validate that the user ID is a positive integer (Telegram IDs are always positive)
     if (!Number.isInteger(user.id) || user.id <= 0) {
       logger.error(
         { component: 'TelegramAuth', userId: user.id, username: user.username },
@@ -82,62 +85,60 @@ export function createAuthMiddleware(options: AuthOptions): MiddlewareFn<Operato
       return;
     }
 
-    // ─── Allowlist Check ─────────────────────────────────────────────────────
-    if (!allowedSet.has(user.id)) {
-      logger.warn(
-        {
-          component: 'TelegramAuth',
-          userId: user.id,
-          username: user.username,
-          allowlistSize: allowedSet.size,
-        },
-        'Rejected unauthorized user'
-      );
-      await ctx.reply(
-        '❌ *Access Denied*\n\nYour account is not authorized to operate this system.',
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-
-    // ─── Attach Operator Context ─────────────────────────────────────────────
+    const chatId = ctx.chat?.id ?? user.id;
     ctx.isAuthenticated = true;
     ctx.operatorId = String(user.id);
+    ctx.telegramUserId = user.id;
+    ctx.chatId = chatId;
+    ctx.isAdmin = adminSet.has(user.id);
 
     logger.debug(
       {
         component: 'TelegramAuth',
-        userId: user.id,
+        telegramUserId: user.id,
         username: user.username,
+        isAdmin: ctx.isAdmin,
       },
-      'Operator authenticated'
+      'Telegram identity accepted'
     );
 
     return next();
   };
 }
 
-/**
- * Standalone allowlist check for use outside middleware flow.
- */
+/** True if user is a platform administrator */
+export function isAdmin(userId: number, adminUserIds: number[]): boolean {
+  return Number.isInteger(userId) && userId > 0 && adminUserIds.includes(userId);
+}
+
+/** @deprecated Prefer isAdmin — allowlist is admin-only now */
 export function isAuthorized(userId: number, allowedUserIds: number[]): boolean {
-  return Number.isInteger(userId) && userId > 0 && allowedUserIds.includes(userId);
+  return isAdmin(userId, allowedUserIds);
+}
+
+export function getOperatorIdentity(ctx: OperatorContext): {
+  operatorId: string;
+  username?: string;
+  isAuthenticated: boolean;
+  isAdmin?: boolean;
+  tenantId?: string;
+  telegramUserId?: number;
+  chatId?: number;
+} {
+  return {
+    operatorId: ctx.operatorId,
+    username: ctx.from?.username,
+    isAuthenticated: ctx.isAuthenticated,
+    isAdmin: ctx.isAdmin,
+    tenantId: ctx.tenantId,
+    telegramUserId: ctx.telegramUserId,
+    chatId: ctx.chatId,
+  };
 }
 
 /**
- * Extracts a clean operator identity string for audit logging.
+ * Gate for admin-only operator commands (sheath, emergencystop, etc. when configured).
  */
-export function getOperatorIdentity(ctx: OperatorContext): {
-  id: string;
-  username?: string;
-  firstName?: string;
-  lastName?: string;
-} {
-  const from = ctx.from;
-  return {
-    id: String(from?.id ?? 'unknown'),
-    username: from?.username,
-    firstName: from?.first_name,
-    lastName: from?.last_name,
-  };
+export function requireAdmin(ctx: OperatorContext): boolean {
+  return ctx.isAdmin === true;
 }

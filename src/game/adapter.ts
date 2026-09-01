@@ -17,6 +17,7 @@ export interface GameAdapterOptions {
   enableDomAdapter?: boolean;
   enableWsAdapter?: boolean;
   enableApiAdapter?: boolean;
+  primarySource?: 'ws' | 'api' | 'dom';
   pollIntervalMs?: number;
 }
 
@@ -33,9 +34,10 @@ export interface GameAdapterOptions {
  * - Emitting normalized events
  */
 export class GameAdapter extends EventEmitter implements IGameAdapter {
-  private readonly options: Required<GameAdapterOptions>;
+  private readonly options: GameAdapterOptions & { enableDomAdapter: boolean; enableWsAdapter: boolean; enableApiAdapter: boolean; primarySource: "ws" | "api" | "dom"; pollIntervalMs: number };
   private readonly logger = getLogger();
   private started = false;
+  private domMissStreak = 0;
   private currentState: RoundState;
   private gameListeners: GameAdapterListener[] = [];
   private pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -51,7 +53,8 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
       enableDomAdapter: true,
       // Multi-source observation enabled by default (P0.4). Feature flags can still disable.
       enableWsAdapter: true,
-      enableApiAdapter: true,
+      enableApiAdapter: false, // REST adapter not implemented
+      primarySource: (process.env.GAME_PRIMARY_SOURCE as 'ws' | 'api' | 'dom') || 'ws',
       pollIntervalMs: TIMEOUTS.domAdapterPollInterval,
       ...options,
     };
@@ -70,6 +73,7 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
       lastTickAt: null,
       source: 'unknown',
       confidence: 'low',
+      // tracked via domMissStreak
     };
   }
 
@@ -82,7 +86,7 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
     this.logger.info({ component: 'GameAdapter' }, 'Starting game adapter');
     this.started = true;
 
-    // Set up DOM polling as the primary observation method for Batch 2
+    // DOM polling as fallback; primarySource prefers ws/api (GAME_PRIMARY_SOURCE)
     if (this.options.enableDomAdapter) {
       this.startDomPolling();
     }
@@ -90,6 +94,25 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
     // Set up WebSocket interception if enabled
     if (this.options.enableWsAdapter) {
       await this.setupWsInterception();
+      // Playwright native WebSocket frames (primary)
+      try {
+        this.options.page.on('websocket', (ws) => {
+          ws.on('framereceived', (ev) => {
+            try {
+              const text = typeof ev.payload === 'string' ? ev.payload : '';
+              if (!text) return;
+              let data: unknown;
+              try { data = JSON.parse(text); } catch { return; }
+              void this.processStateChange({
+                ...(typeof data === 'object' && data ? data : {}),
+                source: 'ws',
+                confidence: 'high',
+              } as never);
+            } catch { /* */ }
+          });
+        });
+      } catch { /* */ }
+
     }
 
     // Verify game is loaded
@@ -373,7 +396,25 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
     }
   }
 
+  getDomHealth(): { missStreak: number; healthy: boolean } {
+    return { missStreak: this.domMissStreak, healthy: this.domMissStreak < 10 };
+  }
+
+  noteDomMiss(missed: boolean): void {
+    this.domMissStreak = missed ? this.domMissStreak + 1 : 0;
+  }
+
   private async setupWsInterception(): Promise<void> {
+    try {
+      await this.options.page.exposeFunction('__crashwaveOnWs', (payload: unknown) => {
+        void this.processStateChange({
+          ...(typeof payload === 'object' && payload ? payload : {}),
+          source: 'ws',
+          confidence: 'high',
+        } as never);
+      });
+    } catch { /* already exposed */ }
+
     // WebSocket interception is set up via page.evaluate
     // This injects a script that intercepts WebSocket messages
     try {
@@ -399,6 +440,10 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
               try {
                 const data = JSON.parse(event.data);
                 // Dispatch a custom event that Playwright can listen to
+                const fn = (window as any).__crashwaveOnWs;
+                if (typeof fn === 'function') {
+                  try { fn(data); } catch (_) {}
+                }
                 window.dispatchEvent(
                   new CustomEvent('bc-game-ws-message', {
                     detail: { url: this.url, data, timestamp: Date.now() },

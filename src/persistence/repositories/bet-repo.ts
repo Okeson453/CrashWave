@@ -36,6 +36,7 @@ export interface BetRecord {
  * Input for creating a new bet record.
  */
 export interface CreateBetInput {
+  tenantId?: string | null;
   sessionId?: string | null;
   roundId?: string | null;
   dailyKey: string;
@@ -85,8 +86,8 @@ export class BetRepository {
 
   async create(input: CreateBetInput): Promise<BetRecord> {
     const query = `
-      INSERT INTO bets (session_id, round_id, daily_key, stake, cash_out_target, state, balance_before)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      INSERT INTO bets (tenant_id, session_id, round_id, daily_key, stake, cash_out_target, state, balance_before)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
     `;
     try {
@@ -94,7 +95,7 @@ export class BetRepository {
       try {
         await client.query('BEGIN');
         const result = await client.query(query, [
-          input.sessionId ?? null, input.roundId ?? null, input.dailyKey, input.stake,
+          input.tenantId ?? null, input.sessionId ?? null, input.roundId ?? null, input.dailyKey, input.stake,
           input.cashOutTarget, input.state ?? 'PENDING', input.balanceBefore ?? null,
         ]);
         const record = this.mapRow(result.rows[0]);
@@ -179,6 +180,18 @@ export class BetRepository {
     }
   }
 
+  async findByUser(userId: string, opts: { limit?: number; status?: string; cursor?: string } = {}): Promise<BetRecord[]> {
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+    const params: unknown[] = [userId];
+    const filters = ['tenant_id = $1'];
+    if (opts.status) { params.push(opts.status.toUpperCase()); filters.push(`state = $${params.length}`); }
+    if (opts.cursor) { params.push(opts.cursor); filters.push(`id < $${params.length}`); }
+    params.push(limit);
+    const query = `SELECT * FROM bets WHERE ${filters.join(' AND ')} ORDER BY created_at DESC LIMIT $${params.length}`;
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row) => this.mapRow(row));
+  }
+
   async findByDailyKey(dailyKey: string): Promise<BetRecord[]> {
     const query = `
       SELECT * FROM bets
@@ -211,6 +224,35 @@ export class BetRepository {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error({ component: 'BetRepository', error: message }, 'Failed to find bets by state');
       throw new CriticalError(`Bet find by state failed: ${message}`, 'BET_FIND_STATE_FAILED');
+    }
+  }
+
+  /**
+   * Stable-ordered pagination for balance reconciliation.
+   * ORDER BY created_at ASC, id ASC is required so OFFSET pages do not overlap or skip rows.
+   */
+  async findByStatePaged(
+    state: BetState,
+    limit: number = 1000,
+    offset: number = 0
+  ): Promise<BetRecord[]> {
+    const query = `
+      SELECT * FROM bets
+      WHERE state = $1
+      ORDER BY created_at ASC, id ASC
+      LIMIT $2
+      OFFSET $3
+    `;
+    try {
+      const result = await this.pool.query(query, [state, limit, offset]);
+      return result.rows.map((row) => this.mapRow(row));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        { component: 'BetRepository', error: message, state, offset },
+        'Failed to find bets by state (paged)'
+      );
+      throw new CriticalError(`Bet paged find by state failed: ${message}`, 'BET_FIND_STATE_PAGED_FAILED');
     }
   }
 
@@ -535,6 +577,16 @@ export class InMemoryBetRepository {
     return Array.from(this.bets.values()).filter((b) => b.sessionId === sessionId);
   }
 
+  async findByUser(userId: string, opts: { limit?: number; status?: string; cursor?: string } = {}): Promise<BetRecord[]> {
+    void userId;
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+    let rows = Array.from(this.bets.values());
+    if (opts.status) {
+      rows = rows.filter((b) => String(b.state).toUpperCase() === opts.status!.toUpperCase());
+    }
+    return rows.slice(0, limit);
+  }
+
   async findByDailyKey(dailyKey: string): Promise<BetRecord[]> {
     return Array.from(this.bets.values()).filter((b) => b.dailyKey === dailyKey);
   }
@@ -543,6 +595,22 @@ export class InMemoryBetRepository {
     return Array.from(this.bets.values())
       .filter((b) => b.state === state)
       .slice(0, limit);
+  }
+
+  async findByStatePaged(
+    state: BetState,
+    limit: number = 1000,
+    offset: number = 0
+  ): Promise<BetRecord[]> {
+    const all = Array.from(this.bets.values())
+      .filter((b) => b.state === state)
+      .sort((a, b) => {
+        const ta = Date.parse(a.createdAt) || 0;
+        const tb = Date.parse(b.createdAt) || 0;
+        if (ta !== tb) return ta - tb;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+    return all.slice(offset, offset + limit);
   }
 
   async findActiveBets(): Promise<BetRecord[]> {

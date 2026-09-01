@@ -69,7 +69,7 @@ export class CriticalError extends AppError {
 }
 
 /**
- * Transient errors may resolve on retry (network timeouts, stale data).
+ * Operational errors are expected business-logic failures (daily limit reached, insufficient balance).
  */
 export class TransientError extends AppError {
   constructor(message: string, code: string = 'TRANSIENT_ERROR', options: Omit<ErrorOptions, 'isTransient'> = {}) {
@@ -77,9 +77,6 @@ export class TransientError extends AppError {
   }
 }
 
-/**
- * Operational errors are expected business-logic failures (daily limit reached, insufficient balance).
- */
 export class OperationalError extends AppError {
   constructor(message: string, code: string = 'OPERATIONAL_ERROR', options: ErrorOptions = {}) {
     super(message, code, options);

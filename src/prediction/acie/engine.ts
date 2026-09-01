@@ -13,7 +13,7 @@ import { TemporalPatternLearner } from './tpl.js';
 import { PredictiveSequenceIntelligence } from './psi.js';
 import { EvidenceEngine } from './evidence.js';
 import { SelfAdaptiveForecastingEngine } from './safe.js';
-import { StrategyLayer, DEFAULT_STRATEGY_POLICY } from './strategy.js';
+import { StrategyLayer, HIGH_FREQUENCY_STRATEGY_POLICY } from './strategy.js';
 import { EntitlementGate } from './entitlement.js';
 import {
   applyOnlineUpdate,
@@ -36,6 +36,7 @@ import {
   StrategyPolicy,
   StrategyRiskState,
 } from './types.js';
+import { acieHeavyEvidenceLatencyMs } from '../metrics-acie.js';
 
 export interface ACIEEngineOptions {
   strategyPolicy?: Partial<StrategyPolicy>;
@@ -55,7 +56,7 @@ export interface CrashLearningResult {
   /** Decision for the *next* round */
   evaluation: ACIEEvaluationResult;
   /** True when heavy batch validation ran this tick */
-  heavyValidationRan: boolean;
+  heavyValidationRan /* intentionally false on hot tick; heavy runs async */: boolean;
   evidence: EvidenceReport;
 }
 
@@ -76,6 +77,9 @@ export class ACIEEngine {
   private lastEvidence: EvidenceReport | null = null;
   private lastModelProbabilities: Record<string, number> = {};
   private readonly heavyEvery: number;
+  private pendingHeavyEvidence = false;
+  private heavyEvidenceScheduled = false;
+  private readonly evidenceMaxN: number;
   private readonly ewmaAlpha: number;
   private lastRiskState: Partial<StrategyRiskState> = {};
 
@@ -86,11 +90,12 @@ export class ACIEEngine {
     this.evidenceEngine = new EvidenceEngine();
     this.safe = new SelfAdaptiveForecastingEngine();
     this.strategy = new StrategyLayer({
-      ...DEFAULT_STRATEGY_POLICY,
+      ...HIGH_FREQUENCY_STRATEGY_POLICY,
       ...opts.strategyPolicy,
     });
     this.entitlement = new EntitlementGate();
     this.heavyEvery = opts.heavyValidationEvery ?? 50;
+    this.evidenceMaxN = Number(process.env.ACIE_EVIDENCE_MAX_N ?? 1000);
     this.ewmaAlpha = opts.ewmaAlpha ?? 0.05;
   }
 
@@ -105,6 +110,41 @@ export class ACIEEngine {
 
   getSequenceState(): SequenceState {
     return this.tpl.computeSequenceState(this.crashPoints);
+  }
+
+
+  exportSnapshot(): {
+    online: OnlineAdaptiveState;
+    crashPoints: number[];
+    consecutiveLosses: number;
+  } {
+    return {
+      online: { ...this.online },
+      crashPoints: this.crashPoints.slice(-2000),
+      consecutiveLosses: this.consecutiveLosses,
+    };
+  }
+
+  importSnapshot(snap: {
+    online?: OnlineAdaptiveState;
+    crashPoints?: number[];
+    consecutiveLosses?: number;
+  }): void {
+    if (snap.crashPoints?.length) {
+      this.seedHistory(
+        snap.crashPoints.map((cp, i) => ({
+          roundId: `restore-${i}`,
+          crashPoint: cp,
+          timestamp: new Date().toISOString(),
+        }))
+      );
+    }
+    if (snap.online) {
+      this.online = { ...snap.online };
+    }
+    if (typeof snap.consecutiveLosses === 'number') {
+      this.consecutiveLosses = snap.consecutiveLosses;
+    }
   }
 
   getOnlineState(): Readonly<OnlineAdaptiveState> {
@@ -164,9 +204,43 @@ export class ACIEEngine {
     return { evaluation, entitlement: null, delivered: evaluation.signal };
   }
 
+
+  /**
+   * Cold path: run evidenceEngine.evaluate off the crash tick (setImmediate).
+   * Caps history to ACIE_EVIDENCE_MAX_N.
+   */
+  private scheduleHeavyEvidence(): void {
+    if (this.heavyEvidenceScheduled || !this.pendingHeavyEvidence) return;
+    this.heavyEvidenceScheduled = true;
+    const run = () => {
+      this.heavyEvidenceScheduled = false;
+      if (!this.pendingHeavyEvidence) return;
+      this.pendingHeavyEvidence = false;
+      try {
+        const t0 = performance.now();
+        const all = this.sol.getRecords();
+        const capped = (all.length > this.evidenceMaxN ? all.slice(-this.evidenceMaxN) : all).slice();
+        this.lastEvidence = this.evidenceEngine.evaluate(capped);
+        this.online = {
+          ...this.online,
+          sinceHeavyValidation: 0,
+          lastHeavyValidationAt: this.online.observationCount,
+        };
+        const ms = performance.now() - t0;
+        acieHeavyEvidenceLatencyMs.observe(ms);
+      } catch {
+        /* keep lastEvidence / lightweight */
+      }
+    };
+    if (typeof setImmediate === 'function') setImmediate(run);
+    else setTimeout(run, 0);
+  }
+
   getEvidenceSnapshot(): EvidenceReport {
     if (this.lastEvidence) return this.lastEvidence;
-    return this.evidenceEngine.evaluate([...this.sol.getRecords()]);
+    const all = this.sol.getRecords();
+    const capped = (all.length > this.evidenceMaxN ? all.slice(-this.evidenceMaxN) : all).slice();
+    return this.evidenceEngine.evaluate(capped);
   }
 
   getConsecutiveLosses(): number {
@@ -251,18 +325,13 @@ export class ACIEEngine {
       alpha: this.ewmaAlpha,
     });
 
-    // 4) Heavy validation on schedule (not blocking)
+    // 4) Heavy validation — FLAG ONLY on hot path (never O(n) evaluate here)
     let heavyValidationRan = false;
     if (this.online.sinceHeavyValidation >= this.heavyEvery) {
-      this.lastEvidence = this.evidenceEngine.evaluate([...this.sol.getRecords()]);
-      this.online = {
-        ...this.online,
-        sinceHeavyValidation: 0,
-        lastHeavyValidationAt: this.online.observationCount,
-      };
-      heavyValidationRan = true;
-    } else if (!this.lastEvidence) {
-      // Lightweight evidence proxy from online metrics until first heavy pass
+      this.pendingHeavyEvidence = true;
+      this.scheduleHeavyEvidence();
+    }
+    if (!this.lastEvidence) {
       this.lastEvidence = this.lightweightEvidence();
     }
 
@@ -287,20 +356,11 @@ export class ACIEEngine {
   private buildEvaluation(riskState?: Partial<StrategyRiskState>): ACIEEvaluationResult {
     const sequenceState = this.tpl.computeSequenceState(this.crashPoints);
     const regime = this.tpl.detectRegime(sequenceState);
-    const history = [...this.sol.getRecords()];
+    // Readonly view — no array copy on the hot path
+    const history = this.sol.getRecords();
 
-    const models = this.psi.estimateModels({
-      crashPoints: this.crashPoints,
-      sequenceState,
-      regime,
-      history,
-      ewmaHitRate: this.online.ewmaHitRate,
-    });
-    this.lastModelProbabilities = Object.fromEntries(
-      models.map((m) => [m.modelName, m.probability])
-    );
-
-    const psi = this.psi.estimate({
+    // Single PSI inference (models + ensemble) — previously ran twice
+    const { psi, models } = this.psi.estimateWithModels({
       crashPoints: this.crashPoints,
       sequenceState,
       regime,
@@ -308,6 +368,9 @@ export class ACIEEngine {
       ensembleWeights: this.online.ensembleWeights,
       ewmaHitRate: this.online.ewmaHitRate,
     });
+    this.lastModelProbabilities = Object.fromEntries(
+      models.map((m) => [m.modelName, m.probability])
+    );
 
     // Prefer latest heavy evidence; blend calibration error with online estimate
     const evidence = this.lastEvidence ?? this.lightweightEvidence();
@@ -326,7 +389,7 @@ export class ACIEEngine {
       currentExposure: riskState?.currentExposure ?? 0,
       consecutiveLosses: riskState?.consecutiveLosses ?? this.consecutiveLosses,
       dailyEntriesUsed: riskState?.dailyEntriesUsed ?? 0,
-      dailyEntriesLimit: riskState?.dailyEntriesLimit ?? 100,
+      dailyEntriesLimit: riskState?.dailyEntriesLimit ?? 500,
       balance: riskState?.balance ?? 0,
     };
 

@@ -91,36 +91,56 @@ export class TemporalPatternLearner {
    * Empirical conditional P(≥1.30 | similar sequence) vs unconditional baseline.
    * Falls back to baseline when matching sample is too small.
    */
+  /**
+   * Empirical conditional P(≥1.30 | similar sequence).
+   * Scans at most `scanLimit` most recent records (from the end) — O(scanLimit).
+   */
   computeConditionalProbability(
     sequenceState: SequenceState,
-    history: SOLRecord[],
-    minMatches = 50
+    history: readonly SOLRecord[],
+    minMatches = 50,
+    scanLimit = 600
   ): { conditional: number; baseline: number; improvement: number; matchCount: number } {
-    if (history.length === 0) {
+    const len = history.length;
+    if (len === 0) {
       return { conditional: 0.65, baseline: 0.65, improvement: 0, matchCount: 0 };
     }
-    const baseline = history.filter((r) => r.reached130).length / history.length;
 
-    const matching = history.filter((r) => {
+    const start = len > scanLimit ? len - scanLimit : 0;
+    let baselineHits = 0;
+    let baselineN = 0;
+    let matchCount = 0;
+    let matchHits = 0;
+
+    const streak = sequenceState.currentStreakBelow130;
+    const clusterLen = sequenceState.lowClusterLength;
+    const clusterActive = sequenceState.lowClusterActive;
+    const softCluster = clusterLen <= 1;
+
+    for (let i = start; i < len; i++) {
+      const r = history[i];
+      baselineN++;
+      if (r.reached130) baselineHits++;
+
       const s = r.sequenceState;
-      return (
-        Math.abs(s.currentStreakBelow130 - sequenceState.currentStreakBelow130) <= 1 &&
-        Math.abs(s.lowClusterLength - sequenceState.lowClusterLength) <= 1 &&
-        (s.lowClusterActive === sequenceState.lowClusterActive ||
-          sequenceState.lowClusterLength <= 1)
-      );
-    });
+      const ds = s.currentStreakBelow130 - streak;
+      if (ds > 1 || ds < -1) continue;
+      const dc = s.lowClusterLength - clusterLen;
+      if (dc > 1 || dc < -1) continue;
+      if (!softCluster && s.lowClusterActive !== clusterActive) continue;
 
-    const conditional =
-      matching.length >= minMatches
-        ? matching.filter((r) => r.reached130).length / matching.length
-        : baseline;
+      matchCount++;
+      if (r.reached130) matchHits++;
+    }
+
+    const baseline = baselineN > 0 ? baselineHits / baselineN : 0.65;
+    const conditional = matchCount >= minMatches ? matchHits / matchCount : baseline;
 
     return {
       conditional,
       baseline,
       improvement: conditional - baseline,
-      matchCount: matching.length,
+      matchCount,
     };
   }
 }

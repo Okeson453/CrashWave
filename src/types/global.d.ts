@@ -10,6 +10,7 @@ declare global {
       LOG_LEVEL?: string;
       METRICS_PORT?: string;
       BC_GAME_URL?: string;
+      BC_GAME_LOGIN_URL?: string;
       BROWSER_HEADLESS?: string;
       BROWSER_PROFILE_DIR?: string;
       [key: string]: string | undefined;

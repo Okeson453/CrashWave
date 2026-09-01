@@ -1,4 +1,5 @@
 import { getLogger } from '../observability/logger';
+import { globalFinancialCircuitBreaker } from '../core/circuit-breaker/financial-circuit-breaker.js';
 import {
   RiskEvaluationInput,
   RiskEvaluationResult,
@@ -30,6 +31,17 @@ export class RiskEngine {
    * RiskEngine's approval is the authoritative business-level decision.
    */
   evaluate(input: RiskEvaluationInput): RiskEvaluationResult {
+    const circuit = globalFinancialCircuitBreaker.snapshot();
+    if (circuit.state === 'OPEN') {
+      const conditions = this.evaluateAllConditions(input);
+      return {
+        approved: false,
+        conditions,
+        rejectionReason: 'Financial circuit breaker is OPEN — entries suspended',
+        firstFailure: 'financial_circuit_open',
+      };
+    }
+
     const conditions = this.evaluateAllConditions(input);
     const failures = this.collectFailures(conditions);
 
@@ -93,16 +105,21 @@ export class RiskEngine {
     const balance = input.currentBalance ?? 0;
     const required = input.requiredStake + input.balanceBuffer;
 
+    const isDryRun = input.mode === 'dry-run';
     return {
-      modeIsLive: input.mode === 'live' || input.mode === 'dry-run',
+      modeIsLive: input.mode === 'live' || isDryRun,
       operatorAuthorized: input.operatorAuthorized,
-      sessionAuthenticated: input.sessionAuthenticated,
+      // Dry-run: authentication is NOT required (virtual trades only)
+      sessionAuthenticated: isDryRun ? true : input.sessionAuthenticated,
       gameLoaded: input.gameLoaded,
       roundStateValid:
         input.roundState !== null &&
         (roundPhase === 'starting' || roundPhase === 'running') &&
         input.roundState.roundId !== null,
-      balanceSufficient: input.currentBalance !== null && balance >= required,
+      // Dry-run: virtual bankroll — treat null/positive simulated balance as sufficient
+      balanceSufficient: isDryRun
+        ? (input.currentBalance === null || balance >= required)
+        : input.currentBalance !== null && balance >= required,
       dailyEntriesBelowLimit: input.dailyEntriesConfirmed < input.maxDailyEntries,
       notPaused: !input.paused,
       killSwitchOff: !input.killSwitch,
@@ -183,6 +200,7 @@ export class RiskEngine {
  */
 let globalRiskEngine: RiskEngine | null = null;
 
+/** @deprecated Prefer `new RiskEngine()` injected from composition */
 export function getRiskEngine(): RiskEngine {
   if (!globalRiskEngine) {
     globalRiskEngine = new RiskEngine();

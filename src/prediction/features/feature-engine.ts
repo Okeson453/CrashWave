@@ -3,7 +3,8 @@ import { HistoricalRound, FeatureVector, FeatureVersion } from '../types.js';
 import { computeFeatures } from './calculators.js';
 import { getLogger } from '../../observability/logger.js';
 
-export const CURRENT_FEATURE_VERSION: FeatureVersion = 'fv-1.0.0';
+import { FEATURE_VERSION_V2 } from './feature-meta.js';
+export const CURRENT_FEATURE_VERSION: FeatureVersion = FEATURE_VERSION_V2;
 
 export class FeatureEngine {
   private readonly logger = getLogger();

@@ -5,47 +5,90 @@ import { withRetry } from '../utils/retry';
 export interface DatabaseConfig {
   connectionString: string;
   poolSize?: number;
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+  queryTimeoutMillis?: number;
 }
 
 let pool: Pool | null = null;
+
+/**
+ * Normalize DATABASE_URL SSL params so pg-connection-string does not emit the
+ * "prefer/require/verify-ca treated as verify-full" deprecation warning.
+ * Explicit `ssl` Pool option is the source of truth.
+ */
+export function normalizeConnectionString(raw: string): {
+  connectionString: string;
+  urlSslMode: string | null;
+} {
+  try {
+    const u = new URL(raw);
+    const urlSslMode = (u.searchParams.get('sslmode') ?? '').toLowerCase() || null;
+    u.searchParams.delete('sslmode');
+    u.searchParams.delete('uselibpqcompat');
+    return { connectionString: u.toString(), urlSslMode };
+  } catch {
+    return { connectionString: raw, urlSslMode: null };
+  }
+}
+
+function resolveSsl(
+  urlSslMode: string | null
+): boolean | { rejectUnauthorized: boolean } | undefined {
+  const sslMode = (
+    process.env.DATABASE_SSL_MODE ??
+    process.env.PGSSLMODE ??
+    urlSslMode ??
+    ''
+  ).toLowerCase();
+
+  if (sslMode === 'disable' || sslMode === 'false') {
+    return false;
+  }
+  // Railway / managed Postgres: TLS on, private CA — do not require public CA verify.
+  if (sslMode === 'require' || sslMode === 'prefer' || sslMode === 'no-verify') {
+    return { rejectUnauthorized: false };
+  }
+  if (sslMode === 'verify-full' || sslMode === 'verify-ca') {
+    return { rejectUnauthorized: true };
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return { rejectUnauthorized: false };
+  }
+  return undefined;
+}
+
+function buildPoolOptions(config: DatabaseConfig): ConstructorParameters<typeof Pool>[0] {
+  const { connectionString, urlSslMode } = normalizeConnectionString(config.connectionString);
+  const ssl = resolveSsl(urlSslMode);
+
+  // Do NOT pass `options: -c statement_timeout=...`.
+  // Railway Postgres / PgBouncer reject it:
+  //   FATAL: unsupported startup parameter in options: statement_timeout
+  // Per-query timeouts can be applied by callers when needed.
+  return {
+    connectionString,
+    max: config.poolSize ?? Number(process.env.DATABASE_POOL_SIZE ?? process.env.DB_POOL_SIZE ?? 10),
+    idleTimeoutMillis: config.idleTimeoutMillis ?? Number(process.env.PG_IDLE_TIMEOUT_MS ?? 30_000),
+    connectionTimeoutMillis:
+      config.connectionTimeoutMillis ?? Number(process.env.PG_CONNECTION_TIMEOUT_MS ?? 5_000),
+    ...(ssl !== undefined ? { ssl } : {}),
+  };
+}
 
 export function createPool(config: DatabaseConfig): Pool {
   if (pool) {
     return pool;
   }
 
-  pool = new Pool({
-    connectionString: config.connectionString,
-    max: config.poolSize ?? 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
-  });
+  const opts = buildPoolOptions(config);
+  pool = new Pool(opts);
 
   pool.on('error', (err) => {
     getLogger().error({ component: 'Database' }, `Unexpected database pool error: ${err.message}`);
   });
 
-  pool.on('connect', (client) => {
-    const tenantId = process.env.TENANT_ID;
-    const controlPlane = (process.env.PLATFORM_MODE ?? '').toLowerCase() === 'control-plane';
-    // pg-pool emits `connect` before handing the client to the pool consumer.
-    // Queue the security GUC first so every subsequent query on this process
-    // uses the correct tenant boundary. withTenantContext() additionally uses
-    // SET LOCAL for transaction-scoped defense in depth.
-    void (async () => {
-      try {
-        if (tenantId) {
-          await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId]);
-          await client.query(`SELECT set_config('app.platform_role', '', false)`);
-        } else if (controlPlane) {
-          await client.query(`SELECT set_config('app.tenant_id', '', false)`);
-          await client.query(`SELECT set_config('app.platform_role', 'control_plane', false)`);
-        }
-      } catch (err) {
-        getLogger().error({ component: 'Database', error: String(err) }, 'Failed to initialize connection security context');
-        client.end().catch(() => undefined);
-      }
-    })();
+  pool.on('connect', () => {
     getLogger().debug({ component: 'Database' }, 'New database connection established');
   });
 
@@ -57,6 +100,32 @@ export function getPool(): Pool {
     throw new Error('Database pool not initialized. Call createPool() first.');
   }
   return pool;
+}
+
+/** Snapshot for Prometheus / backpressure */
+export function getPoolStats(): {
+  total: number;
+  idle: number;
+  waiting: number;
+} {
+  const p = getPool() as Pool & {
+    totalCount?: number;
+    idleCount?: number;
+    waitingCount?: number;
+  };
+  return {
+    total: p.totalCount ?? 0,
+    idle: p.idleCount ?? 0,
+    waiting: p.waitingCount ?? 0,
+  };
+}
+
+export function isPoolSaturated(threshold = 5): boolean {
+  try {
+    return getPoolStats().waiting >= threshold;
+  } catch {
+    return false;
+  }
 }
 
 export async function query<T extends QueryResultRow = QueryResultRow>(
@@ -101,4 +170,17 @@ export async function healthCheck(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Close and clear singleton — allows re-init with different config (tests / multi-tenant workers) */
+export async function resetPool(): Promise<void> {
+  if (pool) {
+    await pool.end().catch(() => undefined);
+    pool = null;
+  }
+}
+
+/** Create a non-singleton pool for isolated tenants / workers */
+export function createIsolatedPool(config: DatabaseConfig): Pool {
+  return new Pool(buildPoolOptions(config));
 }

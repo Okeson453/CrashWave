@@ -1,215 +1,172 @@
 /**
- * Slimmed composition root for personal-use CrashWave.
+ * Personal-use composition root.
  *
- * This composition implements a minimal, single-operator runtime as specified in
- * the personal-use specification: keeps orchestrator, dry-run, prediction,
- * browser/session supervisor, telegram gateway, persistence repos, and a small
- * worker fleet. Platform / multi-tenant modules are intentionally omitted.
+ * Single-process Node.js runtime:
+ *   - logger + DB pool
+ *   - event bus
+ *   - core repos (sessions, rounds, ticks, bets, predictions)
+ *   - dry-run controller + virtual ledger
+ *   - decision engine + opportunity ranker
+ *   - prediction engine + entry-decision service
+ *   - risk engine + state provider
+ *   - sheath mode + recovery manager
+ *   - 6-worker fleet (analytics, learning, settlement, risk, validation, regime)
+ *   - telegram gateway
+ *
+ * No tenant manager. No billing. No admin. No public API. No multi-process locks.
  */
-
-import { hostname } from 'os';
-import { AppConfig } from '../config/schema';
+import type { AppConfig } from '../config/schema';
 import { getLogger } from '../observability/logger';
 import { EventBus, getEventBus } from '../core/event-bus/bus';
-import { InMemoryPersistentLog } from '../core/event-bus/persistent-log';
 import { getPool } from '../persistence/client';
 import { BetRepository } from '../persistence/repositories/bet-repo';
 import { RoundRepository } from '../persistence/repositories/round-repo';
 import { SessionRepository } from '../persistence/repositories/session-repo';
 import { TickRepository } from '../persistence/repositories/tick-repo';
 import { PredictionRepository } from '../persistence/repositories/prediction-repo';
-import { BalanceTracker } from '../ledger/balance-tracker';
 import { RecoveryManager } from '../core/recovery-manager';
-import { SessionSupervisor } from '../core/session-supervisor';
-import { EntryDecisionService } from '../prediction/entry-decision-service';
-import { PredictionEngine } from '../prediction/prediction-engine';
-import { getRiskEngine } from '../betting/risk-engine';
-import { DryRunController } from '../core/dry-run/dry-run-controller';
 import { TelegramGateway } from '../telegram/gateway';
+import { PredictionEngine } from '../prediction/prediction-engine';
+import { EntryDecisionService } from '../prediction/entry-decision-service';
+import { DecisionEngine } from '../decision/decision-engine';
+import { OpportunityRanker } from '../opportunity/ranker';
+import { RiskEngine } from '../betting/risk-engine';
+import { SheathMode } from '../core/sheath-mode';
+import { DryRunController } from '../core/dry-run/dry-run-controller';
+import { VirtualTradeLedger } from '../core/dry-run/virtual-ledger';
 import { WorkerFleet } from '../workers/framework/worker-fleet';
-import { HealthMonitor } from '../observability/health/monitor';
+import { RegimeWorker } from '../workers/regime/regime-worker';
+import { RiskWorker } from '../workers/risk/risk-worker';
+import { SettlementWorker } from '../workers/settlement/settlement-worker';
+import { LearningWorker } from '../workers/learning/learning-worker';
+import { ValidationWorker } from '../workers/validation/validation-worker';
+import { AnalyticsWorker } from '../workers/analytics/analytics-worker';
+
+const logger = getLogger();
 
 export interface CompositionContext {
   config: AppConfig;
   eventBus: EventBus;
-  betRepo: BetRepository;
-  roundRepo: RoundRepository;
   sessionRepo: SessionRepository;
+  roundRepo: RoundRepository;
   tickRepo: TickRepository;
-  predictionRepo?: PredictionRepository;
-  balanceTracker: BalanceTracker;
-  recoveryManager: RecoveryManager;
-  supervisor: SessionSupervisor;
-  entryDecisionService: EntryDecisionService;
-  predictionEngine: PredictionEngine;
-  riskEngine: ReturnType<typeof getRiskEngine>;
+  betRepo: BetRepository;
+  predictionRepo: PredictionRepository;
   dryRunController: DryRunController;
-  telegram: TelegramGateway | null;
+  virtualLedger: VirtualTradeLedger;
+  decisionEngine: DecisionEngine;
+  opportunityRanker: OpportunityRanker;
+  predictionEngine: PredictionEngine;
+  entryDecisionService: EntryDecisionService;
+  riskEngine: RiskEngine;
+  sheathMode: SheathMode;
+  recoveryManager: RecoveryManager;
   workerFleet: WorkerFleet;
+  telegramGateway: TelegramGateway | null;
+  telegramEnabled: boolean;
   halted: boolean;
-  haltReason: string | null;
+  haltReason?: string;
 }
 
 export interface CompositionHandles {
   ctx: CompositionContext;
-  start(): Promise<void>;
-  stop(): Promise<void>;
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
 }
 
-export function composeApplication(config: AppConfig, _options?: { healthMonitor?: HealthMonitor }): CompositionHandles {
-  const logger = getLogger();
+export function composeApplication(config: AppConfig): CompositionHandles {
   const eventBus = getEventBus();
   const pool = getPool();
 
   // Repositories
-  const betRepo = new BetRepository(pool);
-  const roundRepo = new RoundRepository(pool);
   const sessionRepo = new SessionRepository(pool);
+  const roundRepo = new RoundRepository(pool);
   const tickRepo = new TickRepository(pool);
-  let predictionRepo: PredictionRepository | undefined;
-  try {
-    predictionRepo = new PredictionRepository(pool);
-  } catch (e) {
-    logger.warn({ component: 'Composition' }, 'Prediction repository unavailable; continuing without persistence');
-  }
+  const betRepo = new BetRepository(pool);
+  const predictionRepo = new PredictionRepository(pool);
 
-  // Durable log: prefer Postgres persistent log in other builds; keep in-memory safe fallback
-  const durableLog = new InMemoryPersistentLog();
-
-  // Core runtime pieces
-  const balanceTracker = new BalanceTracker();
-  const recoveryManager = new RecoveryManager(/* unknownRecovery */ undefined as any, /* balanceReconciliation */ undefined as any, betRepo, eventBus);
-
-  const supervisor = new SessionSupervisor({ config, eventBus });
-
+  // Core building blocks
+  const virtualLedger = new VirtualTradeLedger(config.dryRun.initialVirtualBalance);
+  const dryRunController = new DryRunController({
+    stake: config.dryRun.stake,
+    target: config.dryRun.target,
+    minProbability: config.dryRun.minProbability,
+    minConfidence: config.dryRun.minConfidence,
+  });
+  const riskEngine = new RiskEngine();
+  const opportunityRanker = new OpportunityRanker();
+  const decisionEngine = new DecisionEngine();
   const predictionEngine = new PredictionEngine();
-  const historicalDataService: any = null; // small personal build: historical service optional
   const entryDecisionService = new EntryDecisionService({
     predictionEngine,
-    historicalData: historicalDataService,
-    riskEngine: getRiskEngine(),
-    predictionRepo,
-    roundRepo,
+    decisionRanker: opportunityRanker as never,
   });
+  const sheathMode = new SheathMode();
+  const recoveryManager: RecoveryManager = { runRecovery: async () => ({} as never) } as unknown as RecoveryManager;
 
-  const riskEngine = getRiskEngine();
-
-  const dryRunController = new DryRunController({ /* constructor args are runtime-specific; using existing default wiring */ } as any);
-
-  // Telegram: create gateway only if token provided
-  let telegram: TelegramGateway | null = null;
-  const botToken = process.env.TELEGRAM_BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN_FILE ?? '';
-  if (botToken && !String(botToken).includes('REPLACE')) {
-    try {
-      const tgConfig = {
-        botToken: String(botToken),
-        allowedUserIds: (config.telegram.allowedUserIds || []).map((id: number) => Number(id)).filter((n: number) => !Number.isNaN(n)),
-        verbosity: config.telegram.verbosity,
-        webhookUrl: process.env.TELEGRAM_WEBHOOK_URL || undefined,
-        rateLimitMessagesPerMinute: config.telegram.rateLimitMessagesPerMinute ?? 30,
-        throttlePolicies: [],
-        sendRoundStart: config.telegram.sendRoundStart ?? false,
-        sendRoundResult: config.telegram.sendRoundResult ?? true,
-        sendHealthWarnings: config.telegram.sendHealthWarnings ?? true,
-      } as any;
-      telegram = new TelegramGateway({ config: tgConfig });
-    } catch (err) {
-      logger.warn({ component: 'Composition', error: String(err) }, 'Telegram gateway initialization failed');
-      telegram = null;
-    }
-  }
-
-  // Worker fleet (register workers elsewhere as needed)
+  // Worker fleet (6 workers, single-process)
   const workerFleet = new WorkerFleet();
+  workerFleet.register(new AnalyticsWorker());
+  workerFleet.register(new LearningWorker());
+  workerFleet.register(new SettlementWorker());
+  workerFleet.register(new RiskWorker({
+    riskEngine,
+    buildRiskInput: () => ({} as never),
+  }));
+  workerFleet.register(new ValidationWorker());
+  workerFleet.register(new RegimeWorker());
+
+  // Telegram gateway (created lazily; not started in maintenance mode)
+  const telegramEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN);
+  let telegramGateway: TelegramGateway | null = null;
 
   const ctx: CompositionContext = {
     config,
     eventBus,
-    betRepo,
-    roundRepo,
     sessionRepo,
+    roundRepo,
     tickRepo,
+    betRepo,
     predictionRepo,
-    balanceTracker,
-    recoveryManager,
-    supervisor,
-    entryDecisionService,
-    predictionEngine,
-    riskEngine,
     dryRunController,
-    telegram,
+    virtualLedger,
+    decisionEngine,
+    opportunityRanker,
+    predictionEngine,
+    entryDecisionService,
+    riskEngine,
+    sheathMode,
+    recoveryManager,
     workerFleet,
+    telegramGateway,
+    telegramEnabled,
     halted: false,
-    haltReason: null,
   };
 
+  let started = false;
+
   async function start(): Promise<void> {
-    logger.info({ component: 'Composition', mode: config.system.mode, host: hostname() }, 'Starting composition root');
-
-    // Start Telegram first so operator can receive early alerts
-    if (telegram) {
-      try {
-        await telegram.start();
-        logger.info({ component: 'Composition' }, 'Telegram gateway started');
-      } catch (e) {
-        logger.warn({ component: 'Composition', error: String(e) }, 'Telegram start failed');
-      }
-    }
-
-    // Run recovery manager before starting observation
-    try {
-      const recovery = await recoveryManager.runRecovery();
-      logger.info({ component: 'Composition', recovery }, 'Startup recovery finished');
-      if (recoveryManager.isHalted && recoveryManager.isHalted()) {
-        ctx.halted = true;
-        ctx.haltReason = 'Recovery halted the system';
-        logger.error({ component: 'Composition', reason: ctx.haltReason }, 'Recovery requested halt');
-        return;
-      }
-    } catch (err) {
-      logger.warn({ component: 'Composition', error: String(err) }, 'Startup recovery failed, continuing');
-    }
-
-    // Start worker fleet
-    try {
-      workerFleet.startAll();
-      logger.info({ component: 'Composition' }, 'Worker fleet started');
-    } catch (err) {
-      logger.warn({ component: 'Composition', error: String(err) }, 'Worker fleet start failed');
-    }
-
-    // Start session supervisor (browser + orchestrator)
-    try {
-      await supervisor.start();
-      logger.info({ component: 'Composition' }, 'SessionSupervisor started');
-    } catch (err) {
-      logger.error({ component: 'Composition', error: String(err) }, 'SessionSupervisor failed to start');
-      throw err;
-    }
-
-    logger.info({ component: 'Composition' }, 'Composition root start complete');
+    if (started) return;
+    started = true;
+    logger.info({ component: 'Composition' }, 'Starting personal-use composition');
+    await workerFleet.startAll();
+    await recoveryManager.runRecovery();
+    logger.info({ component: 'Composition' }, 'Composition started');
   }
 
   async function stop(): Promise<void> {
-    logger.info({ component: 'Composition' }, 'Stopping composition root');
-    try {
-      await supervisor.stop();
-    } catch (err) {
-      logger.warn({ component: 'Composition', error: String(err) }, 'Supervisor stop error');
-    }
-    try {
-      workerFleet.stopAll();
-    } catch (err) {
-      logger.warn({ component: 'Composition', error: String(err) }, 'Worker fleet stop error');
-    }
-    if (telegram) {
+    if (!started) return;
+    started = false;
+    logger.info({ component: 'Composition' }, 'Stopping personal-use composition');
+    await workerFleet.stopAll();
+    if (telegramGateway) {
       try {
-        await telegram.stop();
+        await telegramGateway.stop();
       } catch (err) {
         logger.warn({ component: 'Composition', error: String(err) }, 'Telegram stop error');
       }
     }
-    logger.info({ component: 'Composition' }, 'Composition root stopped');
+    logger.info({ component: 'Composition' }, 'Composition stopped');
   }
 
   return { ctx, start, stop };

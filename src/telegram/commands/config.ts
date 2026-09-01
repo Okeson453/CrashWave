@@ -6,17 +6,42 @@
  * /config confirm <token>
  */
 
+import { randomBytes } from 'crypto';
 import { CommandHandler, CommandResult, OperatorContext } from '../types';
 import { RouterDependencies } from '../router';
 import { getLogger } from '../../observability/logger';
 
 const logger = getLogger();
 
-// In-memory pending confirmations (in production, use Redis with TTL)
-const pendingConfirmations = new Map<string, { key: string; value: string; expiresAt: number }>();
+// In-memory pending confirmations (production should use Redis with TTL)
+// Bound to operator identity + intended key/value + expiry + one-time nonce
+interface PendingConfigConfirmation {
+  key: string;
+  value: string;
+  operatorId: string;
+  expiresAt: number;
+  nonce: string;
+}
+const pendingConfirmations = new Map<string, PendingConfigConfirmation>();
 
 const CONFIRMATION_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const CONFIRMATION_TOKEN_LENGTH = 6;
+const CONFIRMATION_TOKEN_LENGTH = 8;
+
+/** Keys whose values must never be logged in plaintext */
+const SECRET_CONFIG_KEYS = new Set([
+  'password', 'secret', 'token', 'api_key', 'apikey', 'private_key',
+  'bcgame_password', 'bcgame_2fa_secret', 'tenant_master_key',
+  'paystack_secret', 'stripe_secret', 'encryption_key',
+]);
+
+function isSecretKey(key: string): boolean {
+  const k = key.toLowerCase();
+  return SECRET_CONFIG_KEYS.has(k) || k.includes('password') || k.includes('secret') || k.includes('token') || k.includes('key');
+}
+
+function redactValue(key: string, value: string): string {
+  return isSecretKey(key) ? '[REDACTED]' : value;
+}
 
 export function createConfigHandlers(
   deps: RouterDependencies
@@ -102,19 +127,22 @@ async function handleConfigSet(
     };
   }
 
-  // Generate confirmation token
+  // Generate cryptographically random confirmation token bound to operator
   const token = generateToken();
+  const nonce = randomBytes(16).toString('hex');
   pendingConfirmations.set(token, {
     key,
     value,
+    operatorId,
     expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+    nonce,
   });
 
   // Clean up expired tokens
   cleanupExpiredTokens();
 
   logger.info(
-    { component: 'ConfigCommand', operatorId, key, value, token },
+    { component: 'ConfigCommand', operatorId, key, value: redactValue(key, value), tokenPresent: true },
     'Config change requested, awaiting confirmation'
   );
 
@@ -148,6 +176,7 @@ async function handleConfigConfirm(
 
   const token = args[0].toUpperCase();
   const pending = pendingConfirmations.get(token);
+  const operatorId = String(ctx.from?.id ?? 'unknown');
 
   if (!pending) {
     return {
@@ -166,11 +195,23 @@ async function handleConfigConfirm(
     };
   }
 
+  // Bind confirmation to the requesting operator
+  if (pending.operatorId !== operatorId) {
+    logger.warn(
+      { component: 'ConfigCommand', operatorId, expectedOperator: pending.operatorId },
+      'Config confirm rejected — operator mismatch'
+    );
+    return {
+      success: false,
+      message: '🚫 *Unauthorized*\n\nThis confirmation token belongs to a different operator.',
+      parseMode: 'MarkdownV2',
+    };
+  }
+
   const { key, value } = pending;
-  const operatorId = String(ctx.from?.id ?? 'unknown');
 
   logger.info(
-    { component: 'ConfigCommand', operatorId, key, value, token },
+    { component: 'ConfigCommand', operatorId, key, value: redactValue(key, value), tokenPresent: true },
     'Config change confirmed, applying'
   );
 
@@ -186,7 +227,7 @@ async function handleConfigConfirm(
         operatorUsername: ctx.from?.username,
         action: 'config_change',
         key,
-        value,
+        value: redactValue(key, value),
         result: 'success',
       },
       'Operator config change applied'
@@ -212,10 +253,12 @@ async function handleConfigConfirm(
 }
 
 function generateToken(): string {
+  // Cryptographically secure token (not Math.random)
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = randomBytes(CONFIRMATION_TOKEN_LENGTH);
   let token = '';
   for (let i = 0; i < CONFIRMATION_TOKEN_LENGTH; i++) {
-    token += chars.charAt(Math.floor(Math.random() * chars.length));
+    token += chars.charAt(bytes[i]! % chars.length);
   }
   return token;
 }

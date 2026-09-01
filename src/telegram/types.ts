@@ -36,7 +36,7 @@ export type ControlCommand =
 export type ConfigCommand = '/config';
 export type AnalyticsCommand = '/analytics';
 export type LoginCommand = '/login' | '/login_cancel';
-export type MenuCommand = '/start' | '/menu' | '/help';
+export type StartCommand = '/start' | '/menu' | '/help';
 
 export type BotCommand =
   | StatusCommand
@@ -44,7 +44,7 @@ export type BotCommand =
   | ConfigCommand
   | AnalyticsCommand
   | LoginCommand
-  | MenuCommand;
+  | StartCommand;
 
 // ─── Parsed Command ──────────────────────────────────────────────────────────
 

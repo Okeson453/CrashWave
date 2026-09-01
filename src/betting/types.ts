@@ -268,7 +268,7 @@ export interface RiskConditionResults {
 /**
  * Status of an idempotency key.
  */
-export type IdempotencyStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'EXPIRED';
+export type IdempotencyStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'EXPIRED' | 'UNKNOWN';
 
 /**
  * Record of an idempotency key.
