@@ -1,132 +1,184 @@
-# Live Deployment Checklist
+# Live Deployment Checklist — Personal-Use BC.Game Crash Automation
 
-Use this checklist before deploying to live production environment.
+A step-by-step checklist for going from zero to a working bot.
 
-## Pre-Deployment
+## Before you start
 
-- [ ] All tests pass (`npm test`)
-- [ ] Test coverage > 80% on critical paths
-- [ ] Dry-run validation complete (100+ entries, zero unknown states)
-- [ ] Security audit passed (`./scripts/security-audit.sh`)
-- [ ] Performance benchmark passed (`./scripts/performance-benchmark.sh`)
-- [ ] Configuration validated (`npm run config:validate`)
-- [ ] Database migrations applied
-- [ ] Backup script tested
-- [ ] Restore script tested
-- [ ] Telegram bot token valid
-- [ ] Operator Telegram ID in allowlist
+- [ ] A BC.Game account you are willing to risk (ToS).
+- [ ] A Telegram account, plus a bot token from [@BotFather](https://t.me/BotFather).
+- [ ] Your Telegram numeric user ID (DM [@userinfobot](https://t.me/userinfobot) or check via `getUpdates`).
+- [ ] A Linux VPS or local machine (Chromium needs ~512 MB RAM).
+- [ ] PostgreSQL 13+ (15+ if you want TimescaleDB).
 
-## Infrastructure
+## 1. Install
 
-- [ ] Docker Compose file reviewed
-- [ ] PostgreSQL container configured with persistent volume
-- [ ] Redis container configured with persistent volume
-- [ ] Grafana dashboards imported
-- [ ] Prometheus alert rules loaded
-- [ ] Log rotation configured (cron)
-- [ ] Backup cron job configured
-- [ ] S3 credentials configured (if using remote backup)
+```bash
+git clone <your-fork-url>/personal-bc-automation.git
+cd personal-bc-automation
+npm ci
+npx playwright install chromium
+```
 
-## Security
+## 2. Configure
 
-- [ ] `.env` file has restricted permissions (600)
-- [ ] No secrets in repository
-- [ ] Profile directory encrypted
-- [ ] Database password strong
-- [ ] Redis password configured (if exposed)
-- [ ] Firewall rules configured
-- [ ] SSL/TLS for all external connections
+```bash
+cp .env.example .env
+$EDITOR .env
 
-## Monitoring
+# Required:
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+APP_TELEGRAM__ALLOWED_USER_IDS=[<your numeric user ID>]
+DATABASE_URL=postgresql://user:pass@localhost:5432/bc_personal
 
-- [ ] Grafana accessible
-- [ ] Prometheus scraping targets healthy
-- [ ] Alertmanager configured
-- [ ] Telegram alerts tested
-- [ ] Email alerts configured (optional)
-- [ ] PagerDuty/Opsgenie integration (optional)
+# Generate the encryption key
+npm run generate-key
+# Paste the printed 32-byte hex into .env as ENCRYPTION_KEY=
+```
 
-## Betting Configuration
+The default `config.yaml` is fine for a dry-run. Override any of:
+`system.mode`, `betting.stakePerEntry`, `betting.cashOutTarget`,
+`dryRun.*`, `risk.*` if you want different defaults.
 
-- [ ] Stake amount verified
-- [ ] Cash-out target verified
-- [ ] Max daily entries set (default: 100)
-- [ ] Min balance threshold set
-- [ ] Max drawdown threshold set
-- [ ] Consecutive loss threshold set
-- [ ] Day boundary timezone configured
+## 3. Database
 
-## Operator Readiness
+```bash
+docker compose up -d postgres
+# or: pg_ctl / systemctl start postgresql
 
-- [ ] Operator trained on Telegram commands
-- [ ] Operator has access to runbooks
-- [ ] Operator knows emergency procedures
-- [ ] Operator knows how to trigger emergency stop
-- [ ] Operator knows how to resolve unknown bets
-- [ ] Secondary operator identified
+npm run db:migrate
+```
 
-## Go-Live Sequence
+Verify the migrations ran:
+```bash
+psql $DATABASE_URL -c '\dt'
+# Should list: sessions, rounds, bets, predictions, audit_events,
+#              daily_stats, balance_snapshots, ticks
+```
 
-1. [ ] Deploy to observe-only mode
-2. [ ] Verify observation for 30+ rounds
-3. [ ] Verify tick latency < 500ms P99
-4. [ ] Transition to dry-run mode
-5. [ ] Run 100+ dry-run entries
-6. [ ] Verify zero unknown states
-7. [ ] Verify balance reconciliation
-8. [ ] Operator explicitly approves live mode
-9. [ ] Transition to live mode
-10. [ ] Monitor first 5 live bets closely
-11. [ ] Verify Telegram notifications
-12. [ ] Verify Grafana metrics
+## 4. Boot
 
-## Post-Deployment
+```bash
+npm start
+# or: npm run dev  (live reload)
+```
 
-- [ ] First day P&L reviewed
-- [ ] All alerts functioning
-- [ ] Backup completed successfully
-- [ ] Log rotation working
-- [ ] No critical errors in first 24h
-- [ ] Operator sign-off obtained
+In another terminal, confirm the bot is up:
+```bash
+curl -sf http://localhost:9090/health
+# {"status":"ok","mode":"dry-run"}
+```
 
+In Telegram, DM your bot:
+```
+/start
+```
 
-## Detection & Anti-Bot (mandatory review before live)
+You should see the welcome message.
 
-- [ ] **Residential / ISP proxy** configured (`APP_PROXY__ENABLED=true`) with sticky session
-- [ ] Proxy geo matches fingerprint timezone/locale
-- [ ] Confirmed exit IP is not datacenter (check via provider dashboard)
-- [ ] `preferNonHeadlessForLive` left true — live runs **headed**
-- [ ] Advanced stealth v2 enabled
-- [ ] Velocity limits appropriate for stake frequency (not maxed out)
-- [ ] Humanizer / HumanInput enabled for placement and cash-out
-- [ ] Telemetry noise left **disabled** unless deterministic patterns are being flagged
-- [ ] Account-link baseline: one profile directory + one sticky proxy per process
+## 5. Dry-run validation (24 h minimum)
 
-## Auth & Session
+Leave it running for at least 24 hours in dry-run. While it runs:
 
-- [ ] Browser profile restored and authenticated in observe-only
-- [ ] Operator knows `/reauth_complete` procedure after auth loss
-- [ ] Session age threshold understood (`sessionConsistency.maxSessionAgeHours`)
-- [ ] No automated password login (by design) — operator handles re-login in headed UI
+- [ ] `/status` shows mode = `dry-run`, all green.
+- [ ] `/health` shows DB healthy, Telegram polling, workers running.
+- [ ] `/analytics` shows predictions flowing; expected value (EV) trends
+      positive on your chosen target.
+- [ ] `/pnl` shows the virtual ledger converging (or at least
+      non-diverging).
+- [ ] `/daily` shows reasonable daily trade counts and win rate.
+- [ ] No `/emergencystop` or `/sheath` triggers (other than your own
+      manual tests).
 
-## Soak & Evidence
+## 6. Failover checks
 
-- [ ] Observe-only soak ≥ 2 hours completed (`npx tsx scripts/soak-observe.ts --hours 2`)
-- [ ] RSS growth and event-loop lag within soft thresholds
-- [ ] Single-instance lock verified (`REDIS_URL=... npx tsx scripts/verify-single-instance.ts`)
-- [ ] Redis dual-client mutex test run when Redis available
+- [ ] `/sheath` → confirms betting paused; observation continues.
+- [ ] `/unsheath` → resumes.
+- [ ] `/emergencystop` → halts everything; `/status` shows halted.
+- [ ] `/stop` → graceful shutdown; `/status` in Telegram still works
+      after restart.
+- [ ] `/config set stakePerEntry 100` → returns token.
+- [ ] `/config confirm <token>` → applies.
+- [ ] Kill the process (`Ctrl+C` or `docker compose stop app`) → restart
+      → state recovers (in dry-run this is a no-op; in live it should
+      reconcile any UNKNOWN bets).
 
-## Capital & Risk (live money)
+## 7. Going live
 
-- [ ] Maximum loss amount defined and funded account ≤ that amount
-- [ ] Daily entry hard cap set below psychological comfort level
-- [ ] Multi-step live confirmation tokens tested end-to-end
-- [ ] Emergency stop Telegram command tested
-- [ ] Operator present for first 20+ live rounds
-- [ ] Rollback plan: switch mode to `observe-only` or `maintenance` immediately
+⚠️  Only proceed if the dry-run validation passes AND you've read
+`docs/security-model.md` and `README.md`.
 
-## Final sign-off
+### 7a. Login
 
-- [ ] Technical lead signs: no Critical gaps remaining
-- [ ] Operator signs: trained on re-auth, emergency stop, UNKNOWN resolution
-- [ ] Date/time of controlled go-live recorded in `docs/GAP_CLOSURE_LOG.md`
+```
+/login
+```
+The bot will ask for your BC.Game email, then password. After the
+browser launches and authenticates, you'll get a confirmation. The
+encrypted session cookie is stored in `./secrets/browser-profile/`.
+
+If login fails, retry. Common causes:
+- Wrong credentials.
+- BC.Game requiring 2FA (the bot does not yet support 2FA — disable
+  2FA or use a separate account).
+- Stealth detection (try `BROWSER_HEADLESS=false` to see what's
+  happening).
+
+### 7b. Two-step live mode
+
+```
+/mode live                (bot replies with an 8-char token, 60 s TTL)
+/mode confirm XXXXXXXX    (within 60 s, bot confirms LIVE MODE ACTIVATED)
+```
+
+If `/login` has not completed, the bot will refuse with a clear error.
+
+### 7c. Verify
+
+- [ ] `/status` shows mode = `live`, balance tracker reading BC.Game.
+- [ ] `/balance` shows real BC.Game balance.
+- [ ] `/lastround` shows the most recent round.
+- [ ] `/analytics` shows real (not virtual) P&L.
+- [ ] Drawdown is below your risk threshold.
+
+## 8. Day-to-day operation
+
+- **Start of day:** `/status` and `/health`.
+- **Throughout the day:** `/pnl`, `/balance` to watch the bot's
+  performance. If anything looks off, `/pause` and investigate.
+- **End of day:** `/analytics` to review signal quality; wait for the
+  scheduled daily report (if enabled).
+- **If something goes wrong:** `/emergencystop` first, then investigate.
+
+## 9. Backups
+
+- `secrets/` — back up if you want to skip `/login` next time.
+- Postgres data volume — back up weekly (`pg_dump`).
+- `config.yaml` — version-controlled in your private git repo.
+
+## 10. Rollback
+
+If you need to stop:
+
+```bash
+/mode maintenance   # bot stops automated activity but stays responsive
+/emergencystop       # force-halt (requires /resume to recover)
+```
+
+To fully stop the process:
+```bash
+docker compose stop app
+# or: Ctrl+C in the foreground terminal
+```
+
+## 11. Upgrade
+
+```bash
+git pull
+npm ci
+npm run db:migrate       # if migrations changed
+npm run build
+# restart via your process manager (Docker, systemd, pm2)
+```
+
+Always read the changelog before upgrading; the Telegram command surface
+is stable, but config schema may add new optional fields.

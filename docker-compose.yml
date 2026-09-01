@@ -1,0 +1,56 @@
+# Personal-Use BC.Game Crash Automation — single host, two services.
+# Usage:
+#   docker compose up -d postgres
+#   npm run db:migrate
+#   docker compose up -d --build app
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bc_personal
+      POSTGRES_USER: bc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bc -d bc_personal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      APP_SYSTEM__MODE: ${APP_SYSTEM__MODE:-dry-run}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
+      APP_TELEGRAM__ALLOWED_USER_IDS: ${APP_TELEGRAM__ALLOWED_USER_IDS:?set your Telegram user ID in .env}
+      DATABASE_URL: postgresql://bc:${POSTGRES_PASSWORD}@postgres:5432/bc_personal
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?generate via npm run generate-key and paste}
+      BROWSER_HEADLESS: "true"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      METRICS_PORT: 9090
+    volumes:
+      - app_secrets:/app/secrets
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  postgres_data:
+  app_secrets:

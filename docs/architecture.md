@@ -1,151 +1,170 @@
-# Architecture Documentation
+# Architecture — Personal-Use BC.Game Crash Automation
 
-## Overview
+A single Node.js process that boots, watches BC.Game's Crash game, runs ACIE
+predictions, and (in dry-run by default) simulates every signal against a
+virtual ledger — all driven by a Telegram bot.
 
-The BC.Game Crash Automation & Analytics System is a Node.js/TypeScript application that automates observation and betting on the BC.Game Crash game. It uses Playwright for browser automation, PostgreSQL/TimescaleDB for persistence, Redis for distributed coordination, and Telegram for operator notifications.
-
-## System Architecture
-
-```
-+-------------------+     +-------------------+     +-------------------+
-|   Telegram Bot    |<--->|   Core Services   |<--->|   PostgreSQL      |
-|  (Operator UI)    |     |  (Event Bus,      |     |  (Sessions,       |
-+-------------------+     |   State Machine,  |     |   Rounds, Bets,   |
-                          |   Orchestrator)   |     |   Ticks, Audit)   |
-+-------------------+     +-------------------+     +-------------------+
-|   Redis           |              |
-|  (Mutex, Cache)   |              v
-+-------------------+     +-------------------+     +-------------------+
-                          |   Betting Layer   |     |   Analytics       |
-                          |  (Risk Engine,    |     |  (Hit Rate,       |
-                          |   Executors,      |     |   P&L, Drawdown)  |
-                          |   Safeguards)     |     +-------------------+
-                          +-------------------+
-                                   |
-                                   v
-                          +-------------------+
-                          |   Browser Layer   |
-                          |  (Playwright,     |
-                          |   Game Adapter,   |
-                          |   Round Observer) |
-                          +-------------------+
-                                   |
-                                   v
-                          +-------------------+
-                          |   BC.Game Crash   |
-                          |   (Web UI)        |
-                          +-------------------+
-```
-
-## Core Components
-
-### Event Bus
-The Event Bus is the central nervous system of the application. All components communicate through typed events:
-- `GameLoaded` - Browser has loaded the game
-- `RoundStarted` - New round detected
-- `MultiplierUpdated` - Tick recorded
-- `RoundCrashed` - Round ended with crash point
-- `BetPlaced` - Bet placement confirmed
-- `BetCashOut` - Cash-out confirmed
-- `SystemPaused` - System entered paused state
-- `SystemResumed` - System resumed operation
-- `CriticalError` - Unrecoverable error occurred
-
-### State Machine
-The state machine manages the lifecycle of bets through states:
-```
-RESERVED -> REQUESTED -> PENDING -> ACTIVE -> CASHED_OUT
-                                      |
-                                      +-> LOST
-                                      |
-                                      +-> FAILED
-                                      |
-                                      +-> UNKNOWN (recovery needed)
-```
-
-### Orchestrator
-The Orchestrator wires together all components and manages the main observation loop. It:
-1. Starts the browser and navigates to the game
-2. Initializes the game adapter and round observer
-3. Subscribes to round events
-4. Persists round data and ticks
-5. Emits system events
-
-### Session Supervisor
-Manages the full session lifecycle:
-- Browser launch and profile management
-- Authentication and session restoration
-- Game navigation
-- Health monitoring
-- Recovery from failures
-
-## Data Flow
-
-### Observation Flow
-1. Browser loads BC.Game Crash
-2. GameAdapter polls DOM for multiplier updates
-3. RoundObserver detects round transitions
-4. Orchestrator persists rounds and ticks
-5. Analytics engine computes metrics
-
-### Betting Flow
-1. RiskEngine evaluates entry conditions
-2. DailyEntryLedger reserves an entry slot
-3. LiveBetExecutor places bet via DOM interaction
-4. ConfirmationObserver verifies bet placement
-5. Bet state transitions through the state machine
-6. On round crash, P&L is calculated and recorded
-
-### Recovery Flow
-1. On startup, RecoveryManager checks for UNKNOWN bets
-2. UnknownStateRecovery queries round history
-3. Heuristics resolve bets (LOST/RECONCILED)
-4. BalanceReconciliation verifies ledger consistency
-5. System resumes if all conditions are met
-
-## Persistence Layer
-
-### PostgreSQL/TimescaleDB
-- **sessions** - Session records with mode and status
-- **rounds** - Round data with crash points
-- **ticks** - Time-series multiplier data (TimescaleDB hypertable)
-- **bets** - Bet records with full state history
-- **audit_events** - Immutable audit trail
-
-### Redis
-- Distributed mutex for bet placement coordination
-- Configuration cache
-- Session state cache
-
-## Security Model
-
-See [security-model.md](security-model.md) for full details.
-
-Key principles:
-- No secrets in logs
-- Encrypted profiles at rest
-- Telegram allowlist enforcement
-- Complete audit trail
-- Dry-run validation before live mode
-
-## Performance Characteristics
-
-- Tick observation latency: P99 < 500ms (target)
-- Bet placement latency: P95 < 2000ms
-- Database writes: ~100 ticks/round, 1 round every 3-10s
-- Memory: Browser heap monitored, alert at 512MB
-
-## Deployment Architecture
+## 1. Single-process runtime
 
 ```
-+---------------------+
-|   Docker Compose    |
-|  - App Container    |
-|  - Postgres Container|
-|  - Redis Container  |
-|  - Grafana Container|
-|  - Prometheus Cont. |
-+---------------------+
+┌────────────────────────────────────────────────────────────────┐
+│                        index.ts                                 │
+│  1. Load config (config.yaml + .env)                           │
+│  2. Boot logger, DB pool                                       │
+│  3. composeApplication(config)                                 │
+│  4. /health + /metrics HTTP listener on PORT                   │
+│  5. SIGTERM/SIGINT → graceful shutdown                         │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-See [live-deployment-checklist.md](live-deployment-checklist.md) for deployment procedures.
+The single process holds:
+
+- The Telegram bot (long-polling loop) — only if `TELEGRAM_BOT_TOKEN` is set.
+- The PostgreSQL connection pool.
+- The `Orchestrator` event loop (drives `GameAdapter` → `RoundObserver` → DB).
+- A 6-worker fleet (analytics, learning, settlement, risk, validation, regime).
+- The metrics HTTP server on `PORT`/`METRICS_PORT` (default 9090).
+
+## 2. Component diagram (post-refactor)
+
+```
+                ┌────────────────────────────┐
+                │      Telegram Bot          │
+                │  (operator's chat only)    │
+                └──────────────┬─────────────┘
+                               │ commands
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                       CommandRouter                              │
+│  /start /help /status /balance /pnl /daily                       │
+│  /pause /resume /stop /emergencystop /mode                       │
+│  /sheath /unsheath /config                                       │
+└──────────────┬─────────────────────────────────┬─────────────────┘
+               │                                 │
+   (control: pause, mode, config)     (queries: status, pnl, daily)
+               ▼                                 ▼
+┌─────────────────────────┐         ┌─────────────────────────────┐
+│  Orchestrator           │         │  In-memory Stats            │
+│  + DryRunController     │         │  + Virtual Ledger           │
+│  + VirtualLedger        │         │  (DailyEntry, P&L)          │
+└──────────────┬──────────┘         └─────────────────────────────┘
+               │
+               │  events: RoundStarted, RoundCrashed, MultiplierUpdated
+               ▼
+┌─────────────────────────┐    ┌──────────────────────────────────┐
+│  GameAdapter            │    │  WorkerFleet (6 workers)         │
+│  + RoundObserver        │    │  • analytics                     │
+│  (Playwright page)      │    │  • learning                      │
+└──────────────┬──────────┘    │  • settlement                    │
+               │                │  • risk                          │
+               │ every 200ms    │  • validation                    │
+               ▼                │  • regime                        │
+        ┌──────────────┐         └──────────────────────────────────┘
+        │ BC.Game      │
+        │ Crash page   │
+        │ (Chromium)   │
+        └──────────────┘
+```
+
+## 3. Mode semantics
+
+| Mode           | What runs                                                     | What writes to balance     |
+| -------------- | ------------------------------------------------------------- | -------------------------- |
+| `observe-only` | GameAdapter → Observer → Persistence (rounds + ticks)         | Nothing                    |
+| `dry-run` (default) | observe + PredictionEngine → DecisionEngine → DryRunController (virtual ledger) | Virtual ledger only        |
+| `live`         | dry-run flow + LiveExecutor (browser bet + cash-out)          | Real BC.Game account       |
+| `maintenance`  | Nothing automated; commands only                              | Nothing                    |
+
+The mode is set at startup via `APP_SYSTEM__MODE` env var or
+`config.yaml:system.mode`, and can be changed at runtime via `/mode <m>`
+(with the 2-step confirmation for `live`).
+
+## 4. One round, one decision (dry-run)
+
+```
+RoundStarted(roundId)
+   ↓
+RoundObserver publishes event
+   ↓
+Orchestrator emits 'RoundStarted' on EventBus
+   ↓
+Hot handlers (in-process):
+   1. prediction: build feature vector, run ensemble, emit PredictionSignal
+   2. decision:   score, threshold, return DecisionRecord
+   3. dry-run:    if decision === ENTER, controller.openTrade()
+                  → ledger.openTrade()
+   ↓
+GameAdapter polls DOM every 200ms, emits MultiplierUpdated events
+   ↓
+Orchestrator persists ticks (Postgres / TimescaleDB)
+   ↓
+RoundCrashed(roundId, crashPoint)
+   ↓
+Hot handlers:
+   1. dry-run:    controller.onRoundCompleted(roundId, crashPoint)
+                  → ledger.resolveRound() → WIN/LOSS
+   2. settlement:  update bet status, compute P&L
+   3. learning:    record (signal, outcome) tuple
+   4. analytics:   roll up daily stats
+   5. validation:  compare predicted vs actual
+   6. risk:        check drawdown, trigger sheath if needed
+```
+
+## 5. Persistence
+
+- **PostgreSQL 15+** (TimescaleDB extension optional for tick compression).
+- Tables used: `sessions`, `rounds`, `bets`, `predictions`, `audit_events`,
+  `daily_stats`, `balance_snapshots`, `ticks` (hypertable if TimescaleDB
+  available).
+- Redis is **optional**. If provided, it backs the rate-limit window.
+  Without it, an in-memory token bucket is used.
+- Migrations live in `migrations/` and are run by
+  `npm run db:migrate`. Personal-use migrations: `001`–`007`. Deprecated
+  tenant/billing migrations are in `migrations/_deprecated/` for history.
+
+## 6. Startup sequence
+
+```
+[Idle]
+   │ npm start
+   ▼
+[Loading config]      ──fail──▶  [Crash: invalid config]
+   │
+   ▼
+[Connecting DB]       ──fail──▶  [Crash: DATABASE_URL unreachable]
+   │
+   ▼
+[Building composition] (logger, repos, decision engine, dry-run, telegram, workers)
+   │
+   ▼
+[Starting metrics server (:9090)]
+   │
+   ▼
+[Starting Telegram bot (polling)]   (only if TELEGRAM_BOT_TOKEN set)
+   │
+   ▼
+[Starting workers (6)]
+   │
+   ▼
+[Running]  ──SIGTERM──▶  [Graceful shutdown]
+                              │ stop workers
+                              │ stop telegram bot
+                              │ close DB
+                              │ exit 0
+```
+
+## 7. Why no other layers?
+
+There is no:
+
+- **No multi-tenant platform.** Single operator, single Telegram chat.
+- **No billing.** No Stripe, no Paystack, no subscriptions.
+- **No admin dashboard.** The Telegram bot is the only UI.
+- **No public REST API.** The only HTTP listener is the private
+  `/health` + `/metrics` on `127.0.0.1:9090`.
+- **No multi-process locks.** Single process; no Redis polling-lock,
+  no instance-lock.
+- **No outbox publisher.** The event bus is in-memory only.
+- **No tracing.** OTel removed.
+
+A deleted file is a file that can't break.
