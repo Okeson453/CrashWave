@@ -116,7 +116,15 @@ export async function handleLoginConversationText(
         ].join('\n')
       );
     } else {
-      await ctx.reply(`❌ Login failed: ${result.detail ?? 'unknown error'}`);
+      const lines = [`❌ Login failed: ${result.detail ?? result.code ?? 'unknown error'}`];
+      if (result.regionBlocked) {
+        lines.push('Cause: BC.Game region block on this host IP');
+        lines.push('Fix: route browser egress via an allowed region (proxy) or run dry-run without login');
+      }
+      if (result.pageState) lines.push(`pageState: ${result.pageState}`);
+      if (result.loginReport?.action) lines.push(`hint: ${result.loginReport.action}`);
+      if (result.loginReport?.finalUrl) lines.push(`url: ${result.loginReport.finalUrl}`);
+      await ctx.reply(lines.join('\n'));
     }
   } catch (err) {
     await ctx.reply(`❌ Login error: ${err instanceof Error ? err.message : String(err)}`);

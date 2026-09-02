@@ -234,8 +234,50 @@ export async function runLoginTestPipeline(
     stages.push({ stage: 'CredentialSubmission', ok: true, detail: 'SKIPPED_ALREADY_AUTH' });
     stages.push({ stage: 'AuthenticationVerifier', ok: true, detail: 'ALREADY_AUTHENTICATED' });
   } else if (pageState !== 'LOGIN_FORM') {
-    stages.push({ stage: 'LoginFormDetector', ok: false, detail: `pageState=${pageState}`, url: finalUrl });
-    return finish('AUTH_FAILED', 'LOGIN_FORM_UNAVAILABLE', 'LoginFormDetector');
+    // Re-check geo after a short settle — BC.Game often paints the region modal
+    // after the first classification, which used to surface as LOGIN_FORM_UNAVAILABLE.
+    try {
+      await page.waitForTimeout(2000);
+      const regionAgain = await detectRegionRestriction(page);
+      const reclass = await classifyLoginPage(page, opts.loginUrl);
+      finalUrl = reclass.finalUrl || page.url();
+      if (regionAgain.restricted || reclass.detectedPageState === 'GEO_RESTRICTED') {
+        stages.push({
+          stage: 'LoginFormDetector',
+          ok: false,
+          detail: regionAgain.detail ?? reclass.bodySnippet ?? 'GEO_RESTRICTED',
+          url: finalUrl,
+        });
+        return finish('REGION_BLOCKED', 'REGION_RESTRICTION', 'LoginFormDetector', {
+          finalUrl,
+          pageTitle: reclass.pageTitle,
+        });
+      }
+      if (reclass.detectedPageState === 'LOGIN_FORM') {
+        pageState = 'LOGIN_FORM';
+        stages.push({ stage: 'LoginFormDetector', ok: true, detail: 'LOGIN_FORM_AFTER_SETTLE', url: finalUrl });
+      } else if (reclass.detectedPageState === 'SECURITY_CHALLENGE') {
+        stages.push({ stage: 'LoginFormDetector', ok: false, detail: 'SECURITY_CHALLENGE', url: finalUrl });
+        return finish('AUTH_FAILED', 'SECURITY_CHALLENGE', 'LoginFormDetector');
+      } else if (reclass.detectedPageState === 'AUTHENTICATED') {
+        pageState = 'AUTHENTICATED';
+        stages.push({ stage: 'LoginFormDetector', ok: true, detail: 'ALREADY_AUTHENTICATED', url: finalUrl });
+      } else {
+        stages.push({
+          stage: 'LoginFormDetector',
+          ok: false,
+          detail: `pageState=${reclass.detectedPageState}; snippet=${(reclass.bodySnippet || '').slice(0, 120)}`,
+          url: finalUrl,
+        });
+        return finish('AUTH_FAILED', 'LOGIN_FORM_UNAVAILABLE', 'LoginFormDetector', {
+          finalUrl,
+          pageTitle: reclass.pageTitle,
+        });
+      }
+    } catch {
+      stages.push({ stage: 'LoginFormDetector', ok: false, detail: `pageState=${pageState}`, url: finalUrl });
+      return finish('AUTH_FAILED', 'LOGIN_FORM_UNAVAILABLE', 'LoginFormDetector');
+    }
   } else {
     stages.push({ stage: 'LoginFormDetector', ok: true, detail: 'LOGIN_FORM', url: finalUrl });
   }

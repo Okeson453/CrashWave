@@ -29,6 +29,12 @@ const BODY_PATTERNS: RegExp[] = [
   /region (is )?restricted/i,
   /geo[- ]?block/i,
   /service is not available in/i,
+  // BC.Game production copy (exact geo interstitial)
+  /do not accept players from your region/i,
+  /we do not accept players from your region/i,
+  /gaming license regulations/i,
+  /check your VPN connection/i,
+  /we don't serve players from your location/i,
 ];
 
 const TITLE_PATTERNS: RegExp[] = [

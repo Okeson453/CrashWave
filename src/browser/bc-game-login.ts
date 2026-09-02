@@ -155,6 +155,26 @@ export async function classifyLoginPage(
   page: Page,
   requestedUrl: string
 ): Promise<LoginPageDiagnostics> {
+  // SPA + geo interstitial can paint after first paint. Wait briefly for either
+  // the password field, known geo copy, or a challenge marker before classifying.
+  try {
+    await Promise.race([
+      page.locator('input[type="password"]').first().waitFor({ state: 'attached', timeout: 8000 }),
+      page.waitForFunction(
+        () => {
+          const t = (document.body && document.body.innerText) || '';
+          return /do not accept players from your region|gaming license regulations|checking your browser|cloudflare|verify you are human/i.test(
+            t
+          );
+        },
+        { timeout: 8000 }
+      ),
+      page.waitForTimeout(3000),
+    ]).catch(() => undefined);
+  } catch {
+    /* best-effort settle */
+  }
+
   const finalUrl = page.url();
   const pageTitle = await page.title().catch(() => '');
   const bodyText = await page.locator('body').innerText().catch(() => '');
