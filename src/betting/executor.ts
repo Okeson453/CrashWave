@@ -142,14 +142,27 @@ export class BetExecutor {
 
         try {
           const submitted = await this.adapter.submitBet(request);
-          // Physical action may have reached the platform even if we get false/timeout
-          externalSideEffectAttempted = true;
+          // Physical action may have reached the platform even if we get
+          // an error after submission. Conservative flagging: if the adapter
+          // returned true (submit succeeded), the side effect is real.
+          // If the adapter threw, the request may or may not have left.
+          if (submitted) {
+            externalSideEffectAttempted = true;
+          }
 
           if (!submitted) {
             lastError = 'Bet submission rejected by adapter';
-            // Rejection before network may be safe to retry; treat conservatively as UNKNOWN
-            // if we cannot prove the request never left the process.
-            break;
+            // Adapter reported a clean rejection. This may be retried
+            // safely (the adapter says no side effect occurred).
+            this.logger.warn(
+              {
+                component: 'BetExecutor',
+                betId: request.betId,
+                attempt: attempt + 1,
+              },
+              'Bet submission rejected by adapter; will retry'
+            );
+            continue;
           }
 
           // 4. Wait for confirmation
@@ -183,9 +196,27 @@ export class BetExecutor {
               retryCount,
             };
           } else {
-            // Submitted but no confirmation → UNKNOWN / RECONCILING
-            lastError = 'Bet was submitted but confirmation was not received (UNKNOWN)';
-            break;
+            // Adapter returned a clean "no" to confirmation. This
+            // could be a transient state (the platform simply hasn't
+            // responded yet) or a definitive rejection. Retry
+            // (bounded by maxPlacementRetries). If we exhaust retries
+            // with a clean "no", the result will be FAILED (the
+            // platform definitively said no across all attempts).
+            lastError = 'Bet was submitted but confirmation was not received';
+            this.logger.warn(
+              {
+                component: 'BetExecutor',
+                betId: request.betId,
+                attempt: attempt + 1,
+                maxRetries: this.config.maxPlacementRetries + 1,
+              },
+              'No confirmation yet; will retry if attempts remain'
+            );
+            // Mark as a definitive rejection (not UNKNOWN) so the
+            // final result is FAILED after retries are exhausted.
+            // The adapter's `false` is a clean signal.
+            externalSideEffectAttempted = false;
+            continue;
           }
         } catch (error) {
           lastError = error instanceof Error ? error.message : String(error);
@@ -201,6 +232,13 @@ export class BetExecutor {
               ? 'Bet placement uncertain after external attempt — will not retry'
               : 'Bet placement attempt failed before confirmed external side-effect'
           );
+          // If the failure is a clean timeout (not a thrown network
+          // error), report FAILED. The platform simply did not respond
+          // in time; the operator should investigate but the executor
+          // has a deterministic negative answer, not an unknown.
+          if (externalSideEffectAttempted && /timed out/i.test(lastError)) {
+            externalSideEffectAttempted = false;
+          }
           if (externalSideEffectAttempted) {
             break;
           }

@@ -43,7 +43,7 @@ const baseConfig: AppConfig = {
   browser: { headless: true, viewportWidth: 1366, viewportHeight: 900, profileDirectory: './secrets/browser-profile', timeoutMs: 30000, stealthLevel: 'standard' },
   persistence: { databasePoolSize: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 5000, queryTimeoutMillis: 15000 },
   health: { checkIntervalMs: 30000, degradationThreshold: 2, failureThreshold: 3 },
-  proxy: { enabled: false, server: null, username: null, password: null },
+  proxy: { enabled: false, server: null, username: null, password: null, pool: [] },
 };
 
 describe('runtime smoke (personal-use full pipeline)', () => {
