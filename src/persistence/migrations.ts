@@ -46,6 +46,11 @@ export class FileMigrationRunner implements MigrationRunner {
     }));
   }
 
+  /** Public for diagnostic / dry-run inspection. */
+  listAvailable(): string[] {
+    return this.getMigrations().map((m) => m.filename);
+  }
+
   private computeChecksum(content: string): string {
     const { createHash } = require('crypto');
     return createHash('sha256').update(content).digest('hex');

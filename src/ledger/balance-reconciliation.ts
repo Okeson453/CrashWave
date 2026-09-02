@@ -58,6 +58,7 @@ const DEFAULT_CONFIG: BalanceReconciliationConfig = {
 export class BalanceReconciliation {
   private readonly logger = getLogger();
   private readonly config: BalanceReconciliationConfig;
+  private readonly injectedPool: { query: (q: string, a?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> } | null = null;
   private lastResult: ReconciliationResult | null = null;
   private consecutiveMismatches = 0;
   private maxConsecutiveMismatches = 3;
@@ -166,29 +167,72 @@ export class BalanceReconciliation {
    */
   async computeExpectedBalance(): Promise<number> {
     try {
-      // Query all settled bets by iterating states and sum their PnL.
+      // Prefer SQL aggregates — never silently cap at 1000 rows
+      const pool = this.injectedPool ?? (this.betRepo as unknown as { pool?: { query: (q: string, a?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> } }).pool;
+      if (pool?.query) {
+        const agg = await pool.query(
+          `WITH snap AS (
+             SELECT balance, captured_at FROM balance_snapshots
+             ORDER BY captured_at DESC LIMIT 1
+           )
+           SELECT
+             COALESCE((SELECT balance FROM snap), (
+               SELECT balance_before FROM bets
+               WHERE balance_before IS NOT NULL
+               ORDER BY created_at DESC LIMIT 1
+             ))::float8 AS baseline,
+             COALESCE((
+               SELECT SUM(pnl) FROM bets
+               WHERE state IN ('CASHED_OUT','LOST','FAILED','RECONCILED')
+                 AND (
+                   NOT EXISTS (SELECT 1 FROM snap)
+                   OR created_at > (SELECT captured_at FROM snap)
+                 )
+             ), 0)::float8 AS total_pnl`
+        );
+        const row = agg.rows[0] ?? {};
+        const totalPnL = Number(row.total_pnl ?? 0);
+        const baselineBalance = row.baseline != null ? Number(row.baseline) : null;
+        if (baselineBalance === null || !Number.isFinite(baselineBalance)) {
+          return this.balanceTracker.getCurrentBalance() ?? 0;
+        }
+        return Math.round((baselineBalance + totalPnL) * 100) / 100;
+      }
+
+      // Fallback: paginate until exhausted (no silent 1000 cap)
       const settledStates = ['CASHED_OUT', 'LOST', 'FAILED', 'RECONCILED'] as const;
       let totalPnL = 0;
       let baselineBalance: number | null = null;
-
       for (const state of settledStates) {
-        const bets = await this.betRepo.findByState(state, 1000);
-        for (const bet of bets) {
-          if (bet.pnl !== null) {
-            totalPnL += bet.pnl;
+        let offset = 0;
+        const pageSize = 1000;
+        for (;;) {
+          const bets =
+            typeof (this.betRepo as unknown as { findByStatePaged?: Function }).findByStatePaged === 'function'
+              ? await (this.betRepo as unknown as { findByStatePaged: (s: string, limit: number, offset: number) => Promise<Array<{ pnl: number | null; balanceBefore: number | null }>> }).findByStatePaged(state, pageSize, offset)
+              : await this.betRepo.findByState(state, pageSize);
+          if (!bets.length) break;
+          for (const bet of bets) {
+            if (bet.pnl !== null) totalPnL += bet.pnl;
+            if (baselineBalance === null && bet.balanceBefore !== null) {
+              baselineBalance = bet.balanceBefore;
+            }
           }
-          if (baselineBalance === null && bet.balanceBefore !== null) {
-            baselineBalance = bet.balanceBefore;
+          if (bets.length < pageSize) break;
+          offset += pageSize;
+          // Safety: if repo ignores offset, avoid infinite loop
+          if (offset > 1_000_000) {
+            this.logger.warn(
+              { component: 'BalanceReconciliation', state, offset },
+              'Reconciliation pagination safety stop'
+            );
+            break;
           }
         }
       }
-
       if (baselineBalance === null) {
-        // No baseline yet — use current balance as expected
-        const current = this.balanceTracker.getCurrentBalance();
-        return current ?? 0;
+        return this.balanceTracker.getCurrentBalance() ?? 0;
       }
-
       return Math.round((baselineBalance + totalPnL) * 100) / 100;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import { getLogger } from '../observability/logger';
+import { redisOptionsFromUrl } from './redis-options';
 
 export interface RedisConfig {
   url: string;
@@ -16,33 +17,28 @@ export function createRedisClient(config: RedisConfig): Redis {
     return redisClient;
   }
 
-  const url = new URL(config.url);
-  const isTls = url.protocol === 'rediss:';
   const keyPrefix =
     config.keyPrefix ||
     process.env.REDIS_KEY_PREFIX ||
     undefined;
 
-  redisClient = new Redis({
-    host: url.hostname,
-    port: parseInt(url.port || '6379', 10),
-    username: url.username ? decodeURIComponent(url.username) : undefined,
-    password: config.password || (url.password ? decodeURIComponent(url.password) : undefined),
-    tls: isTls ? { servername: url.hostname } : undefined,
-    db: parseInt(url.pathname.replace('/', '') || '0', 10),
-    keyPrefix: keyPrefix || undefined,
-    commandTimeout: config.commandTimeoutMs ?? 5000,
-    reconnectOnError: (err) => {
-      const msg = err.message.toLowerCase();
-      return msg.includes('econnrefused') || msg.includes('connection lost');
-    },
-    retryStrategy: (times) => {
-      const delay = Math.min(times * (config.reconnectIntervalMs ?? 3000), 30000);
-      return delay;
-    },
-    maxRetriesPerRequest: 3,
-    lazyConnect: true,
-  });
+  redisClient = new Redis(
+    redisOptionsFromUrl(config.url, {
+      ...(config.password ? { password: config.password } : {}),
+      ...(keyPrefix ? { keyPrefix } : {}),
+      commandTimeout: config.commandTimeoutMs ?? 5000,
+      reconnectOnError: (err) => {
+        const msg = err.message.toLowerCase();
+        return msg.includes('econnrefused') || msg.includes('connection lost');
+      },
+      retryStrategy: (times) => {
+        const delay = Math.min(times * (config.reconnectIntervalMs ?? 3000), 30000);
+        return delay;
+      },
+      maxRetriesPerRequest: 3,
+      lazyConnect: true,
+    })
+  );
 
   redisClient.on('connect', () => {
     getLogger().info({ component: 'Redis' }, 'Redis client connected');

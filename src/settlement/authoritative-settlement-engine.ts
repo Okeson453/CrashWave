@@ -1,9 +1,32 @@
 /**
  * Authoritative Settlement Engine
  * Double-entry ledger, SERIALIZABLE transactions, idempotent by client_order_id.
+ *
+ * Accounting model (balanced per order):
+ *
+ * INTENT (lock wager W):
+ *   Debit  LIABILITY:UNSETTLED_EXPOSURE  W   (open exposure / restricted capital)
+ *   Credit ASSET:CASINO_HOT_WALLET       W   (available hot-wallet ↓)
+ *
+ * SETTLEMENT LOSS (grossPayout = 0):
+ *   Debit  EQUITY:REALIZED_PNL           W
+ *   Credit LIABILITY:UNSETTLED_EXPOSURE  W   (close exposure; loss recognized)
+ *
+ * SETTLEMENT WIN (grossPayout = G ≥ W):
+ *   Debit  ASSET:CASINO_HOT_WALLET       G   (payout received)
+ *   Credit LIABILITY:UNSETTLED_EXPOSURE  W   (close exposure)
+ *   Credit EQUITY:REALIZED_PNL         G−W   (profit)
+ *
+ * SETTLEMENT VOID (no external execution / refund):
+ *   Debit  ASSET:CASINO_HOT_WALLET       W
+ *   Credit LIABILITY:UNSETTLED_EXPOSURE  W   (release lock, no PnL)
+ *
+ * assertBalanced() enforces Σ debit = Σ credit for the order.
  */
 import type { Pool, PoolClient } from 'pg';
 import { getLogger } from '../observability/logger';
+import { OperationalError } from '../utils/errors';
+import { withRetry } from '../utils/retry';
 import {
   SettlementPayloadSchema,
   type SettlementPayload,
@@ -17,10 +40,14 @@ export class AuthoritativeSettlementEngine {
   constructor(private readonly pool: Pool) {}
 
   /**
-   * Phase 1 — Intent: debit HOT_WALLET, credit UNSETTLED_EXPOSURE.
+   * Phase 1 — Intent: debit UNSETTLED (open exposure), credit HOT_WALLET (lock funds).
    * Must run inside the same logical unit as bet creation when possible.
    */
   async createOrderIntent(intent: CreateOrderIntent): Promise<{ orderId: string }> {
+    return withRetry(() => this.createOrderIntentOnce(intent), { maxRetries: 4, baseDelayMs: 25, maxDelayMs: 500, shouldRetry: (e) => String((e as { code?: string }).code ?? '') === '40001' });
+  }
+
+  private async createOrderIntentOnce(intent: CreateOrderIntent): Promise<{ orderId: string }> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
@@ -52,11 +79,9 @@ export class AuthoritativeSettlementEngine {
       );
       const orderId = ins.rows[0]!.id;
 
-      // Balanced pair: Debit HOT_WALLET (asset down), Credit UNSETTLED (liability up)
-      // Accounting convention: for asset decrease we credit; for liability increase we credit.
-      // Spec uses: Debit CASINO_HOT_WALLET, Credit UNSETTLED_EXPOSURE for placement lock.
-      await this.insertEntry(client, orderId, LEDGER_ACCOUNTS.HOT_WALLET, intent.wagerAmount, 0, 'wager lock');
-      await this.insertEntry(client, orderId, LEDGER_ACCOUNTS.UNSETTLED, 0, intent.wagerAmount, 'exposure open');
+      // Balanced pair: Debit UNSETTLED (open exposure), Credit HOT_WALLET (lock capital)
+      await this.insertEntry(client, orderId, LEDGER_ACCOUNTS.UNSETTLED, intent.wagerAmount, 0, 'exposure open');
+      await this.insertEntry(client, orderId, LEDGER_ACCOUNTS.HOT_WALLET, 0, intent.wagerAmount, 'wager lock');
 
       await this.assertBalanced(client, orderId);
       await client.query('COMMIT');
@@ -81,7 +106,7 @@ export class AuthoritativeSettlementEngine {
   async markReconciling(clientOrderId: string): Promise<void> {
     await this.pool.query(
       `UPDATE settlement_orders SET status = 'RECONCILING', updated_at = now()
-       WHERE client_order_id = $1 AND status IN ('DISPATCHED','PENDING_SETTLEMENT')`,
+       WHERE client_order_id = $1 AND status IN ('DISPATCHED','PENDING_SETTLEMENT','ORDER_INTENT')`,
       [clientOrderId]
     );
   }
@@ -90,6 +115,10 @@ export class AuthoritativeSettlementEngine {
    * Phase 3–4 — Authoritative settlement (idempotent).
    */
   async settleOrder(payload: SettlementPayload): Promise<{ settled: boolean; alreadyFinal?: boolean }> {
+    return withRetry(() => this.settleOrderOnce(payload), { maxRetries: 4, baseDelayMs: 25, maxDelayMs: 500, shouldRetry: (e) => String((e as { code?: string }).code ?? '') === '40001' });
+  }
+
+  private async settleOrderOnce(payload: SettlementPayload): Promise<{ settled: boolean; alreadyFinal?: boolean }> {
     const data = SettlementPayloadSchema.parse(payload);
     const client = await this.pool.connect();
 
@@ -103,7 +132,7 @@ export class AuthoritativeSettlementEngine {
       );
 
       if (!orderRes.rowCount) {
-        throw new Error(`Order intent not found: ${data.clientOrderId}`);
+        throw new OperationalError(`Order intent not found: ${data.clientOrderId}`, 'SETTLEMENT_ORDER_NOT_FOUND');
       }
 
       const order = orderRes.rows[0];
@@ -113,35 +142,38 @@ export class AuthoritativeSettlementEngine {
       }
 
       const wager = Number(order.wager_amount);
-      const netPnl = data.grossPayout - wager;
+      const gross = Number(data.grossPayout);
+      const netPnl = gross - wager;
       const finalStatus =
         data.status === 'WIN' ? 'SETTLED_WIN' : data.status === 'LOSS' ? 'SETTLED_LOSS' : 'VOID';
 
-      // Clear unsettled exposure (debit liability)
-      await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.UNSETTLED, wager, 0, 'exposure close');
-
-      if (data.grossPayout > 0) {
-        // Credit asset for payout received
-        await this.insertEntry(
-          client,
-          order.id,
-          LEDGER_ACCOUNTS.HOT_WALLET,
-          0,
-          data.grossPayout,
-          'payout'
-        );
-      }
-
-      // Realized PnL: credit equity for profit, debit for loss
-      if (netPnl >= 0) {
-        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.REALIZED_PNL, 0, netPnl, 'pnl');
+      if (data.status === 'VOID') {
+        // Release lock: reverse the intent (refund to hot wallet, close exposure)
+        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.HOT_WALLET, wager, 0, 'void refund');
+        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.UNSETTLED, 0, wager, 'exposure close void');
+      } else if (data.status === 'LOSS') {
+        // Close exposure against realized loss (no payout)
+        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.REALIZED_PNL, wager, 0, 'pnl loss');
+        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.UNSETTLED, 0, wager, 'exposure close');
       } else {
-        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.REALIZED_PNL, Math.abs(netPnl), 0, 'pnl');
-      }
-
-      // Optional house-edge expense line when loss and multiplier implies edge
-      if (data.status === 'LOSS' && data.multiplier <= 1.0) {
-        // already reflected in pnl
+        // WIN: receive gross payout, close exposure, book net profit
+        if (gross > 0) {
+          await this.insertEntry(
+            client,
+            order.id,
+            LEDGER_ACCOUNTS.HOT_WALLET,
+            gross,
+            0,
+            'payout'
+          );
+        }
+        await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.UNSETTLED, 0, wager, 'exposure close');
+        if (netPnl > 0) {
+          await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.REALIZED_PNL, 0, netPnl, 'pnl profit');
+        } else if (netPnl < 0) {
+          // Edge case: reported WIN with gross < wager — treat residual as loss
+          await this.insertEntry(client, order.id, LEDGER_ACCOUNTS.REALIZED_PNL, Math.abs(netPnl), 0, 'pnl residual');
+        }
       }
 
       await this.assertBalanced(client, order.id);
@@ -191,7 +223,7 @@ export class AuthoritativeSettlementEngine {
     await client.query(
       `INSERT INTO ledger_entries (order_id, account, debit, credit, memo)
        VALUES ($1, $2, $3, $4, $5)`,
-      [orderId, account, debit, credit, memo ?? null]
+      [orderId, account, debit.toFixed(8), credit.toFixed(8), memo ?? null]
     );
   }
 
@@ -208,12 +240,17 @@ export class AuthoritativeSettlementEngine {
     }
   }
 
-  /** Account balance from journal (debits − credits for assets; opposite for liabilities/equity) */
+  /**
+   * Account balance from journal.
+   * Assets: debits − credits (positive = higher asset)
+   * Liabilities / Equity: credits − debits (positive = higher liability/equity)
+   * This helper returns raw debit−credit; callers interpret by account type.
+   */
   async getAccountBalance(account: string): Promise<number> {
-    const r = await this.pool.query<{ bal: string }>(
-      `SELECT COALESCE(SUM(debit) - SUM(credit), 0) AS bal FROM ledger_entries WHERE account = $1`,
-      [account]
+    const r = await this.pool.query<{ balance: string }>(
+      `SELECT balance FROM ledger_balance_cache WHERE account = $1`,
+      [account],
     );
-    return Number(r.rows[0]?.bal ?? 0);
+    return Number(r.rows[0]?.balance ?? 0);
   }
 }

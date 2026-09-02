@@ -1,10 +1,23 @@
 /**
  * Velocity & rate controller — limits action frequency to reduce bot-like patterns.
+ * Personal-use adaptation: reads its config from a local interface (the
+ * spec §3.1 dropped the platform `velocity` block from the AppConfig).
  */
 
-import { VelocityConfig } from '../config/schema';
 import { getLogger } from '../observability/logger';
 import { metricCollector } from '../observability/metrics/collectors';
+
+export interface VelocityConfig {
+  enabled: boolean;
+  maxActionsPerMinute: number;
+  maxActionsPerHour: number;
+  minActionIntervalMs: number;
+  maxActionIntervalMs: number;
+  idleProbability: number;
+  minIdleMs: number;
+  maxIdleMs: number;
+  cashOutJitterMs: number;
+}
 
 interface ActionRecord {
   timestamp: number;

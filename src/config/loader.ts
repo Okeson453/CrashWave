@@ -97,46 +97,5 @@ export function loadAndValidateConfig(configPath?: string): AppConfig {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Configuration validation failed:\n${issues}`);
   }
-  return applyTenantEnvOverrides(parsed.data);
-}
-
-/**
- * When TENANT_ID is set, Control Plane injects fixed plan parameters via env.
- * Single-tenant deployments are unaffected.
- */
-export function applyTenantEnvOverrides(config: AppConfig): AppConfig {
-  if (!process.env.TENANT_ID) return config;
-
-  const mode = process.env.MODE ?? process.env.SYSTEM_MODE;
-  const stake = process.env.CUSTOM_STAKE ?? process.env.FIXED_STAKE;
-  const target = process.env.FIXED_TARGET;
-  const maxEntries = process.env.MAX_DAILY_ENTRIES;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  const allowedUserIds = process.env.TELEGRAM_ALLOWED_USER_IDS
-    ?.split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-
-  return {
-    ...config,
-    system: {
-      ...config.system,
-      mode: (mode as AppConfig['system']['mode']) ?? config.system.mode,
-    },
-    betting: {
-      ...config.betting,
-      stakePerEntry: stake != null ? parseInt(stake, 10) : config.betting.stakePerEntry,
-      cashOutTarget: target != null ? parseFloat(target) : config.betting.cashOutTarget,
-      maxDailyEntries:
-        maxEntries != null ? parseInt(maxEntries, 10) : config.betting.maxDailyEntries,
-    },
-    telegram: {
-      ...config.telegram,
-      allowedUserIds: chatId
-        ? [chatId]
-        : allowedUserIds?.length
-          ? allowedUserIds
-        : config.telegram.allowedUserIds,
-    },
-  };
+  return parsed.data;
 }

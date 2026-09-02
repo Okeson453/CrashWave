@@ -14,10 +14,13 @@ import {
   CommandHandler,
   BotCommand,
 } from './types';
-import { createStatusHandlers } from './commands/status';
 import { createControlHandlers } from './commands/control';
 import { createConfigHandlers } from './commands/config';
+import { createStartHandlers } from './commands/start';
+import { createStatusHandlers } from './commands/status';
 import { createAnalyticsHandlers } from './commands/analytics';
+import { createLoginHandlers, handleLoginConversationText } from './commands/login';
+// Tenant removed for personal use.
 
 const logger = getLogger();
 
@@ -38,6 +41,21 @@ export interface RouterDependencies {
   setConfigValue?: (key: string, value: string) => Promise<boolean>;
   /** Optional windowed analytics provider (amount, unit) e.g. (7, 'd') */
   getWindowedAnalytics?: (amount: number, unit: string) => unknown;
+  /** V1.1 Sheath Mode */
+  sheathSystem?: () => Promise<boolean>;
+  unsheathSystem?: () => Promise<boolean>;
+  getSheathState?: () => { state: string; bettingSuspended: boolean; triggers: string[] };
+  /** Secure one-shot BC.Game login (password never stored) */
+  loginWithCredentials?: (email: string, password: string) => Promise<{
+    ok: boolean;
+    authenticated: boolean;
+    regionBlocked?: boolean;
+    gameLoaded?: boolean;
+    observing?: boolean;
+    detail?: string;
+    maskedEmail?: string;
+  }>;
+  // tenantRuntimeFactory removed for personal use
 }
 
 export class CommandRouter {
@@ -63,9 +81,17 @@ export class CommandRouter {
    */
   middleware(): MiddlewareFn<OperatorContext> {
     return async (ctx, next) => {
-      // Only process text messages that look like commands
       const text = ctx.message && 'text' in ctx.message ? ctx.message.text : undefined;
-      if (!text || !text.startsWith('/')) {
+      if (!text) {
+        return next();
+      }
+
+      // Active /login conversation (email/password replies — not commands).
+      // In dry-run the conversation is a no-op; the operator can use /login
+      // before /mode live.
+      if (!text.startsWith('/')) {
+        const handled = await handleLoginConversationText(ctx, text, this.dependencies);
+        if (handled) return;
         return next();
       }
 
@@ -77,8 +103,7 @@ export class CommandRouter {
           'Rate limit exceeded'
         );
         await ctx.reply(
-          '⏱ *Rate Limited*\n\nToo many commands. Please slow down.',
-          { parse_mode: 'Markdown' }
+          'Rate limited. Too many commands — please slow down.'
         );
         return;
       }
@@ -87,8 +112,7 @@ export class CommandRouter {
       const parsed = this.parseCommand(text, ctx);
       if (!parsed) {
         await ctx.reply(
-          '❓ *Unknown Command*\n\nUse /status to see available commands.',
-          { parse_mode: 'Markdown' }
+          'Unknown command.\n\nUse /menu or /status to see available commands.'
         );
         return;
       }
@@ -109,13 +133,12 @@ export class CommandRouter {
       const handler = this.handlers.get(parsed.command);
       if (!handler) {
         await ctx.reply(
-          `❓ Command *\`${parsed.command}\`* is not yet implemented.`,
-          { parse_mode: 'MarkdownV2' }
+          `Command ${parsed.command} is not yet implemented. Try /menu.`
         );
         return;
       }
 
-      // Execute handler
+      // Execute handler — never block Telegram on long work
       try {
         const result = await handler(ctx, parsed.args);
         await this.sendResult(ctx, result);
@@ -130,9 +153,9 @@ export class CommandRouter {
           },
           'Command handler error'
         );
+        // Plain text — avoid Markdown entity parse failures on dynamic errors
         await ctx.reply(
-          `⚠️ *Error executing command*\n\n${this.escapeMarkdown(message)}`,
-          { parse_mode: 'MarkdownV2' }
+          `Error executing command.\n\n${message.slice(0, 400)}\n\nTry /status or /menu.`
         );
       }
     };
@@ -159,8 +182,9 @@ export class CommandRouter {
     // Validate it's a known command
     const knownCommands: string[] = [
       '/status', '/balance', '/daily', '/session', '/pnl', '/entries', '/health', '/lastround',
-      '/pause', '/resume', '/stop', '/emergencystop', '/mode',
+      '/pause', '/resume', '/stop', '/emergencystop', '/mode', '/sheath', '/unsheath',
       '/config', '/analytics',
+      '/login', '/login_cancel', '/start', '/menu', '/help',
     ];
     if (!knownCommands.includes(command)) {
       return null;
@@ -199,22 +223,31 @@ export class CommandRouter {
   }
 
   private async sendResult(ctx: OperatorContext, result: CommandResult): Promise<void> {
+    // Handlers that already replied (e.g. /login) return empty message — skip
+    if (!result.message || !result.message.trim()) {
+      return;
+    }
+
     const options: Record<string, unknown> = {};
     if (result.parseMode) options.parse_mode = result.parseMode;
     if (result.replyToMessageId) options.reply_to_message_id = result.replyToMessageId;
     if (result.extra) Object.assign(options, result.extra);
 
-    await ctx.reply(result.message, options);
-  }
-
-  private escapeMarkdown(text: string): string {
-    return text
-      .replace(/\\/g, '\\\\')
-      .replace(/`/g, '\\`')
-      .replace(/\*/g, '\\*')
-      .replace(/_/g, '\\_')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]');
+    try {
+      await ctx.reply(result.message, options);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Telegram 400 on bad Markdown/MarkdownV2 — fall back to plain text
+      if (/parse entities|can't parse|Bad Request/i.test(msg)) {
+        logger.warn({ component: 'CommandRouter', error: msg }, 'Parse mode failed — plain-text fallback');
+        const plain = result.message.replace(/[*_`\[\]()~>#+=|{}.!\\-]/g, '');
+        if (plain.trim()) {
+          await ctx.reply(plain);
+        }
+        return;
+      }
+      throw err;
+    }
   }
 
   private registerDefaultHandlers(): void {
@@ -224,13 +257,19 @@ export class CommandRouter {
   private rebuildHandlers(): void {
     this.handlers.clear();
 
-    // Status commands
+    // /start, /menu, /help
+    const startHandlers = createStartHandlers(this.dependencies);
+    startHandlers.forEach((handler, command) => {
+      this.handlers.set(command, handler);
+    });
+
+    // Status commands (read-only views)
     const statusHandlers = createStatusHandlers(this.dependencies);
     statusHandlers.forEach((handler, command) => {
       this.handlers.set(command, handler);
     });
 
-    // Control commands
+    // Control commands (the operator's primary interface)
     const controlHandlers = createControlHandlers(this.dependencies);
     controlHandlers.forEach((handler, command) => {
       this.handlers.set(command, handler);
@@ -242,11 +281,22 @@ export class CommandRouter {
       this.handlers.set(command, handler);
     });
 
-    // Analytics commands
+    // /analytics
     const analyticsHandlers = createAnalyticsHandlers(this.dependencies);
     analyticsHandlers.forEach((handler, command) => {
       this.handlers.set(command, handler);
     });
+
+    // /login, /login_cancel (and conversation interceptor above)
+    const loginHandlers = createLoginHandlers(this.dependencies);
+    loginHandlers.forEach((handler, command) => {
+      this.handlers.set(command, handler);
+    });
+  }
+
+  /** Expose deps for login conversation middleware */
+  getDependencies(): RouterDependencies {
+    return this.dependencies;
   }
 }
 
@@ -265,8 +315,7 @@ export function createReauthCompleteHandler(
   return async (ctx) => {
     const result = await complete();
     await ctx.reply(
-      result.ok ? `✅ ${result.message}` : `⚠️ ${result.message}`,
-      { parse_mode: 'Markdown' }
+      result.ok ? `OK ${result.message}` : `Warning: ${result.message}`
     );
   };
 }

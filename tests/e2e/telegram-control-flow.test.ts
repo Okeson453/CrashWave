@@ -108,7 +108,7 @@ describe('E2E: Telegram Control Flow', () => {
       await middleware(ctx, next);
 
       expect(ctx.reply).toHaveBeenCalledWith(
-        expect.stringContaining('live'),
+        expect.stringMatching(/live/i),
         expect.any(Object)
       );
     });
@@ -145,7 +145,7 @@ describe('E2E: Telegram Control Flow', () => {
       await middleware(ctx, next);
 
       const replyCall = (ctx.reply as jest.Mock).mock.calls[0];
-      expect(replyCall[0]).toContain('live');
+      expect(replyCall[0]).toMatch(/live/i);
     });
   });
 

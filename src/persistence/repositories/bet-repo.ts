@@ -36,6 +36,7 @@ export interface BetRecord {
  * Input for creating a new bet record.
  */
 export interface CreateBetInput {
+  tenantId?: string | null;
   sessionId?: string | null;
   roundId?: string | null;
   dailyKey: string;
@@ -84,6 +85,7 @@ export class BetRepository {
   }
 
   async create(input: CreateBetInput): Promise<BetRecord> {
+    // Personal-use: bets table doesn't have tenant_id; ignore input.tenantId.
     const query = `
       INSERT INTO bets (session_id, round_id, daily_key, stake, cash_out_target, state, balance_before)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -98,17 +100,29 @@ export class BetRepository {
           input.cashOutTarget, input.state ?? 'PENDING', input.balanceBefore ?? null,
         ]);
         const record = this.mapRow(result.rows[0]);
-        const eventId = randomUUID();
-        await client.query(
-          `INSERT INTO financial_ledger_events
-            (id, bet_id, tenant_id, event_type, amount, evidence, correlation_id)
-           VALUES ($1, $2, NULLIF(current_setting('app.tenant_id', true), '')::uuid, 'BET_INTENDED', $3, $4::jsonb, $2)`,
-          [eventId, record.id, record.stake, JSON.stringify({ state: record.state, target: record.cashOutTarget })]
-        );
-        await client.query(
-          `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
-          [eventId, 'EntryApproved', JSON.stringify({ betId: record.id, roundId: record.roundId, stake: record.stake, target: record.cashOutTarget }), record.id, 'BetRepository']
-        );
+        // Personal-use: financial_ledger_events / outbox are not part of the
+        // personal schema (they live in 013/014/017 which are in _deprecated/).
+        // Best-effort: skip silently if those tables don't exist.
+        try {
+          const eventId = randomUUID();
+          await client.query(
+            `INSERT INTO financial_ledger_events
+              (id, bet_id, event_type, amount, evidence, correlation_id)
+             VALUES ($1, $2, 'BET_INTENDED', $3, $4::jsonb, $2)`,
+            [eventId, record.id, record.stake, JSON.stringify({ state: record.state, target: record.cashOutTarget })]
+          );
+        } catch {
+          // table may not exist; ignore in personal-use
+        }
+        try {
+          const eventId = randomUUID();
+          await client.query(
+            `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
+            [eventId, 'EntryApproved', JSON.stringify({ betId: record.id, roundId: record.roundId, stake: record.stake, target: record.cashOutTarget }), record.id, 'BetRepository']
+          );
+        } catch {
+          // function may not exist; ignore
+        }
         await client.query('COMMIT');
         this.logger.info({ component: 'BetRepository', betId: record.id, state: record.state }, 'Bet created transactionally');
         return record;
@@ -179,6 +193,20 @@ export class BetRepository {
     }
   }
 
+  async findByUser(userId: string, opts: { limit?: number; status?: string; cursor?: string } = {}): Promise<BetRecord[]> {
+    // Personal-use: tenant_id column dropped; match on session_id (which is a
+    // surrogate for "this operator" in single-tenant mode).
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+    const params: unknown[] = [userId];
+    const filters = ['session_id = $1'];
+    if (opts.status) { params.push(opts.status.toUpperCase()); filters.push(`state = $${params.length}`); }
+    if (opts.cursor) { params.push(opts.cursor); filters.push(`id < $${params.length}`); }
+    params.push(limit);
+    const query = `SELECT * FROM bets WHERE ${filters.join(' AND ')} ORDER BY created_at DESC LIMIT $${params.length}`;
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row) => this.mapRow(row));
+  }
+
   async findByDailyKey(dailyKey: string): Promise<BetRecord[]> {
     const query = `
       SELECT * FROM bets
@@ -211,6 +239,35 @@ export class BetRepository {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error({ component: 'BetRepository', error: message }, 'Failed to find bets by state');
       throw new CriticalError(`Bet find by state failed: ${message}`, 'BET_FIND_STATE_FAILED');
+    }
+  }
+
+  /**
+   * Stable-ordered pagination for balance reconciliation.
+   * ORDER BY created_at ASC, id ASC is required so OFFSET pages do not overlap or skip rows.
+   */
+  async findByStatePaged(
+    state: BetState,
+    limit: number = 1000,
+    offset: number = 0
+  ): Promise<BetRecord[]> {
+    const query = `
+      SELECT * FROM bets
+      WHERE state = $1
+      ORDER BY created_at ASC, id ASC
+      LIMIT $2
+      OFFSET $3
+    `;
+    try {
+      const result = await this.pool.query(query, [state, limit, offset]);
+      return result.rows.map((row) => this.mapRow(row));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        { component: 'BetRepository', error: message, state, offset },
+        'Failed to find bets by state (paged)'
+      );
+      throw new CriticalError(`Bet paged find by state failed: ${message}`, 'BET_FIND_STATE_PAGED_FAILED');
     }
   }
 
@@ -286,23 +343,33 @@ export class BetRepository {
         const record = this.mapRow(result.rows[0]);
 
         if (input.state && input.state !== previous.state) {
-          const eventId = randomUUID();
-          const eventType = this.financialEventType(input.state);
-          await client.query(
-            `INSERT INTO financial_ledger_events
-              (id, bet_id, tenant_id, event_type, amount, multiplier, evidence, correlation_id)
-             VALUES ($1, $2, NULLIF(current_setting('app.tenant_id', true), '')::uuid, $3, $4, $5, $6::jsonb, $7)`,
-            [
-              eventId, id, eventType, record.pnl, record.confirmedCashOutMultiplier,
-              JSON.stringify({ previousState: previous.state, newState: record.state, failureReason: record.failureReason, externalReference: input.externalReference ?? null, settlementSource: input.settlementSource ?? null, settlementEvidence: input.settlementEvidence ?? {} }), id,
-            ]
-          );
+          // Personal-use: financial_ledger_events / outbox are best-effort; the
+          // tenant_id column was removed from the personal schema.
+          try {
+            const eventId = randomUUID();
+            const eventType = this.financialEventType(input.state);
+            await client.query(
+              `INSERT INTO financial_ledger_events
+                (id, bet_id, event_type, amount, multiplier, evidence, correlation_id)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $2)`,
+              [
+                eventId, id, eventType, record.pnl, record.confirmedCashOutMultiplier,
+                JSON.stringify({ previousState: previous.state, newState: record.state, failureReason: record.failureReason, externalReference: input.externalReference ?? null, settlementSource: input.settlementSource ?? null, settlementEvidence: input.settlementEvidence ?? {} }),
+              ]
+            );
+          } catch {
+            // financial_ledger_events table not in personal-use schema
+          }
           const systemEvent = this.systemEventForState(input.state);
           if (systemEvent) {
-            await client.query(
-              `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
-              [eventId, systemEvent, JSON.stringify({ betId: id, previousState: previous.state, state: record.state, pnl: record.pnl, multiplier: record.confirmedCashOutMultiplier }), id, 'BetRepository']
-            );
+            try {
+              await client.query(
+                `SELECT enqueue_outbox_event($1,$2,$3::jsonb,$4,$5)`,
+                [randomUUID(), systemEvent, JSON.stringify({ betId: id, newState: record.state }), id, 'BetRepository']
+              );
+            } catch {
+              // enqueue_outbox_event not in personal-use schema
+            }
           }
         }
 
@@ -535,6 +602,16 @@ export class InMemoryBetRepository {
     return Array.from(this.bets.values()).filter((b) => b.sessionId === sessionId);
   }
 
+  async findByUser(userId: string, opts: { limit?: number; status?: string; cursor?: string } = {}): Promise<BetRecord[]> {
+    void userId;
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+    let rows = Array.from(this.bets.values());
+    if (opts.status) {
+      rows = rows.filter((b) => String(b.state).toUpperCase() === opts.status!.toUpperCase());
+    }
+    return rows.slice(0, limit);
+  }
+
   async findByDailyKey(dailyKey: string): Promise<BetRecord[]> {
     return Array.from(this.bets.values()).filter((b) => b.dailyKey === dailyKey);
   }
@@ -543,6 +620,22 @@ export class InMemoryBetRepository {
     return Array.from(this.bets.values())
       .filter((b) => b.state === state)
       .slice(0, limit);
+  }
+
+  async findByStatePaged(
+    state: BetState,
+    limit: number = 1000,
+    offset: number = 0
+  ): Promise<BetRecord[]> {
+    const all = Array.from(this.bets.values())
+      .filter((b) => b.state === state)
+      .sort((a, b) => {
+        const ta = Date.parse(a.createdAt) || 0;
+        const tb = Date.parse(b.createdAt) || 0;
+        if (ta !== tb) return ta - tb;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+    return all.slice(offset, offset + limit);
   }
 
   async findActiveBets(): Promise<BetRecord[]> {

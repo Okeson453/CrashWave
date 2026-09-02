@@ -212,17 +212,26 @@ export class DailyEntryLedger {
 
       // 3. Update daily stats
       const wasConfirmed = entry.status === 'CONFIRMED';
-      await client.query(
-        `
-        UPDATE daily_stats
-        SET entries_reserved = GREATEST(entries_reserved - 1, 0),
-            entries_failed = entries_failed + 1,
-            ${wasConfirmed ? 'entries_confirmed = GREATEST(entries_confirmed - 1, 0),' : ''}
-            updated_at = NOW()
-        WHERE daily_key = $1
-        `,
-        [dailyKey]
-      );
+      if (wasConfirmed) {
+        await client.query(
+          `UPDATE daily_stats
+           SET entries_reserved = GREATEST(entries_reserved - 1, 0),
+               entries_failed = entries_failed + 1,
+               entries_confirmed = GREATEST(entries_confirmed - 1, 0),
+               updated_at = NOW()
+           WHERE daily_key = $1`,
+          [dailyKey]
+        );
+      } else {
+        await client.query(
+          `UPDATE daily_stats
+           SET entries_reserved = GREATEST(entries_reserved - 1, 0),
+               entries_failed = entries_failed + 1,
+               updated_at = NOW()
+           WHERE daily_key = $1`,
+          [dailyKey]
+        );
+      }
 
       this.logger.info(
         { component: 'DailyEntryLedger', dailyKey, betId, reason },
@@ -316,20 +325,31 @@ export class DailyEntryLedger {
   // ─── Private Helpers ───────────────────────────────────────────────────────
 
   private async withSerializableTransaction<T>(
-    fn: (client: PoolClient) => Promise<T>
+    fn: (client: PoolClient) => Promise<T>,
+    maxAttempts = 3
   ): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
-      const result = await fn(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        lastError = error;
+        const code = (error as { code?: string })?.code;
+        if (code === '40001' && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 20 * attempt));
+          continue;
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
     }
+    throw lastError;
   }
 
   private async lockDailyStats(
@@ -618,17 +638,18 @@ export class InMemoryDailyEntryLedger extends DailyEntryLedger {
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const acquire = this.lock;
-    let release: () => void;
+    let release!: () => void;
     const nextLock = new Promise<void>((resolve) => {
       release = resolve;
     });
-    this.lock = acquire.then(() => nextLock, () => nextLock);
-    await acquire;
+    // Always advance the chain even if prior work rejected
+    const prev = this.lock.catch(() => undefined);
+    this.lock = prev.then(() => nextLock);
+    await prev;
     try {
       return await fn();
     } finally {
-      release!();
+      release();
     }
   }
 }

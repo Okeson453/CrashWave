@@ -141,25 +141,41 @@ export class ConfirmationObserver {
   async waitForBetPlaced(roundId: string, _sessionId: string, timeoutMs?: number): Promise<boolean> {
     const deadline = Date.now() + (timeoutMs ?? this.config.defaultTimeoutMs);
     const correlationId = `confirm-bet-${roundId}`;
+    const requireAuth = this.config.requireAuthoritativeConfirmation;
 
     this.logger.debug(
-      { component: 'ConfirmationObserver', correlationId, roundId },
+      { component: 'ConfirmationObserver', correlationId, roundId, requireAuth },
       'Starting bet placement confirmation observation'
     );
 
     while (Date.now() < deadline) {
-      if (this.authoritativeBetReader) {
-        const authoritative = await this.authoritativeBetReader(roundId, _sessionId).catch(() => null);
+      // Fail-closed: when authoritative mode is enabled, ONLY a positive
+      // authoritative result confirms. Null / timeout / reader error remain unconfirmed.
+      if (requireAuth) {
+        if (!this.authoritativeBetReader) {
+          await this.delay(this.config.domPollIntervalMs);
+          continue;
+        }
+        const authoritative = await this.authoritativeBetReader(roundId, _sessionId).catch((err) => {
+          this.logger.warn(
+            { component: 'ConfirmationObserver', correlationId, error: String(err) },
+            'Authoritative bet reader error — remaining unconfirmed'
+          );
+          return null;
+        });
         if (authoritative?.confirmed) {
-          this.logger.info({ component: 'ConfirmationObserver', correlationId, roundId, source: 'api' }, 'Bet placement confirmed by authoritative reader');
+          this.logger.info(
+            { component: 'ConfirmationObserver', correlationId, roundId, source: 'api' },
+            'Bet placement confirmed by authoritative reader'
+          );
           return true;
         }
-      } else if (this.config.requireAuthoritativeConfirmation) {
-        // DOM/WebSocket signals are observations only; they cannot prove server settlement.
+        // Explicit non-confirmation or null → keep polling until deadline
         await this.delay(this.config.domPollIntervalMs);
         continue;
       }
-      // 1. Check DOM (legacy/non-authoritative mode only)
+
+      // Legacy / non-authoritative mode only: DOM + correlated WS observations
       const domConfirmed = await this.checkDomForBetPlaced();
       if (domConfirmed) {
         this.logger.info(
@@ -169,12 +185,11 @@ export class ConfirmationObserver {
         return true;
       }
 
-      // 2. Check WebSocket messages
       const wsConfirmed = await this.checkWebSocketForBetPlaced(roundId);
       if (wsConfirmed) {
         this.logger.info(
           { component: 'ConfirmationObserver', correlationId, roundId, source: 'websocket' },
-          'Bet placement confirmed via WebSocket'
+          'Bet placement confirmed via WebSocket (correlated)'
         );
         return true;
       }
@@ -184,7 +199,7 @@ export class ConfirmationObserver {
 
     this.logger.warn(
       { component: 'ConfirmationObserver', correlationId, roundId },
-      'Bet placement confirmation timed out'
+      'Bet placement confirmation timed out (UNKNOWN)'
     );
     return false;
   }
@@ -196,26 +211,53 @@ export class ConfirmationObserver {
   async waitForCashOut(betId: string, roundId: string, timeoutMs?: number): Promise<number | null> {
     const deadline = Date.now() + (timeoutMs ?? this.config.defaultTimeoutMs);
     const correlationId = `confirm-cashout-${betId}`;
+    const requireAuth = this.config.requireAuthoritativeConfirmation;
 
     this.logger.debug(
-      { component: 'ConfirmationObserver', correlationId, betId, roundId },
+      { component: 'ConfirmationObserver', correlationId, betId, roundId, requireAuth },
       'Starting cash-out confirmation observation'
     );
 
     while (Date.now() < deadline) {
-      if (this.authoritativeCashOutReader) {
-        const authoritative = await this.authoritativeCashOutReader(betId, roundId).catch(() => null);
-        if (authoritative?.confirmed && authoritative.multiplier != null) {
-          this.logger.info({ component: 'ConfirmationObserver', correlationId, betId, source: 'api', multiplier: authoritative.multiplier, externalReference: authoritative.externalReference }, 'Cash-out confirmed by authoritative reader');
+      // Fail-closed: when authoritative mode is enabled, ONLY a positive
+      // authoritative result with multiplier confirms. Null/error remain UNKNOWN.
+      if (requireAuth) {
+        if (!this.authoritativeCashOutReader) {
+          await this.delay(this.config.domPollIntervalMs);
+          continue;
+        }
+        const authoritative = await this.authoritativeCashOutReader(betId, roundId).catch((err) => {
+          this.logger.warn(
+            { component: 'ConfirmationObserver', correlationId, error: String(err) },
+            'Authoritative cash-out reader error — remaining unconfirmed'
+          );
+          return null;
+        });
+        if (authoritative?.confirmed && authoritative.multiplier != null && authoritative.multiplier > 0) {
+          this.logger.info(
+            {
+              component: 'ConfirmationObserver',
+              correlationId,
+              betId,
+              source: 'api',
+              multiplier: authoritative.multiplier,
+              externalReference: authoritative.externalReference,
+            },
+            'Cash-out confirmed by authoritative reader'
+          );
           return authoritative.multiplier;
         }
-      } else if (this.config.requireAuthoritativeConfirmation) {
         await this.delay(this.config.domPollIntervalMs);
         continue;
       }
-      // 1. Check DOM (legacy/non-authoritative mode only)
+
+      // Legacy / non-authoritative mode only
       const domResult = await this.checkDomForCashOut();
-      if (domResult.confirmed && domResult.multiplier !== undefined) {
+      if (
+        domResult.confirmed &&
+        domResult.multiplier != null &&
+        domResult.multiplier > 0
+      ) {
         this.logger.info(
           { component: 'ConfirmationObserver', correlationId, betId, source: 'dom', multiplier: domResult.multiplier },
           'Cash-out confirmed via DOM'
@@ -223,12 +265,11 @@ export class ConfirmationObserver {
         return domResult.multiplier;
       }
 
-      // 2. Check WebSocket messages
       const wsMultiplier = await this.checkWebSocketForCashOut(betId, roundId);
-      if (wsMultiplier !== null) {
+      if (wsMultiplier !== null && wsMultiplier > 0) {
         this.logger.info(
           { component: 'ConfirmationObserver', correlationId, betId, source: 'websocket', multiplier: wsMultiplier },
-          'Cash-out confirmed via WebSocket'
+          'Cash-out confirmed via WebSocket (correlated)'
         );
         return wsMultiplier;
       }
@@ -238,7 +279,7 @@ export class ConfirmationObserver {
 
     this.logger.warn(
       { component: 'ConfirmationObserver', correlationId, betId, roundId },
-      'Cash-out confirmation timed out'
+      'Cash-out confirmation timed out (UNKNOWN)'
     );
     return null;
   }
@@ -293,6 +334,8 @@ export class ConfirmationObserver {
 
   /**
    * Checks intercepted WebSocket messages for bet placement confirmation.
+   * Requires exact correlation to roundId (or suffix). Pattern-only matches
+   * are rejected — they are observations only, never financial confirmation.
    */
   private async checkWebSocketForBetPlaced(roundId: string): Promise<boolean> {
     try {
@@ -300,22 +343,19 @@ export class ConfirmationObserver {
         return window.__crashAutomationWsMessages ?? [];
       });
 
-      // Filter recent messages matching the bet-placed pattern
       const recentMessages = messages.filter(
         (m) => m.timestamp > Date.now() - 30000
       );
 
+      const roundSuffix = roundId.length > 8 ? roundId.slice(-8) : roundId;
+
       for (const msg of recentMessages) {
-        if (this.config.betPlacedWsPattern.test(msg.data)) {
-          // Additional heuristic: check if roundId is mentioned
-          if (msg.data.includes(roundId) || msg.data.includes(roundId.slice(-8))) {
-            return true;
-          }
-          // If pattern matches but roundId not found, still count it as
-          // a weak signal — but we require DOM confirmation too.
-          // For now, accept pattern match alone as a pragmatic compromise.
+        if (!this.config.betPlacedWsPattern.test(msg.data)) continue;
+        // Strict correlation: message must reference this round
+        if (msg.data.includes(roundId) || (roundSuffix.length >= 6 && msg.data.includes(roundSuffix))) {
           return true;
         }
+        // Uncorrelated pattern match is observation only — do not confirm
       }
 
       return false;
@@ -326,8 +366,10 @@ export class ConfirmationObserver {
 
   /**
    * Checks intercepted WebSocket messages for cash-out confirmation.
+   * Requires correlation to betId and/or roundId plus a parseable multiplier.
+   * Uncorrelated or multiplier-less pattern matches are never treated as confirmation.
    */
-  private async checkWebSocketForCashOut(_betId: string, _roundId: string): Promise<number | null> {
+  private async checkWebSocketForCashOut(betId: string, roundId: string): Promise<number | null> {
     try {
       const messages: Array<{ timestamp: number; data: string }> = await this.page.evaluate(() => {
         return window.__crashAutomationWsMessages ?? [];
@@ -337,24 +379,36 @@ export class ConfirmationObserver {
         (m) => m.timestamp > Date.now() - 30000
       );
 
+      const betSuffix = betId.length > 8 ? betId.slice(-8) : betId;
+      const roundSuffix = roundId.length > 8 ? roundId.slice(-8) : roundId;
+
       for (const msg of recentMessages) {
-        if (this.config.cashOutWsPattern.test(msg.data)) {
-          // Try to extract multiplier from the message
-          const multiplierMatch = msg.data.match(/"multiplier"[:\s]+([0-9]+\.?[0-9]*)/i);
-          if (multiplierMatch) {
-            return parseFloat(multiplierMatch[1]);
-          }
+        if (!this.config.cashOutWsPattern.test(msg.data)) continue;
 
-          // Fallback: look for any numeric value that could be the multiplier
-          const genericMatch = msg.data.match(/([0-9]+\.[0-9]{2,})x?/);
-          if (genericMatch) {
-            return parseFloat(genericMatch[1]);
-          }
+        const correlatesToBet =
+          msg.data.includes(betId) || (betSuffix.length >= 6 && msg.data.includes(betSuffix));
+        const correlatesToRound =
+          msg.data.includes(roundId) || (roundSuffix.length >= 6 && msg.data.includes(roundSuffix));
 
-          // If we can't parse multiplier but pattern matches, return 0
-          // to signal confirmation (caller will use observed multiplier)
-          return 0;
+        if (!correlatesToBet && !correlatesToRound) {
+          // Uncorrelated cash-out message — observation only
+          continue;
         }
+
+        const multiplierMatch = msg.data.match(/"multiplier"[:\s]+([0-9]+\.?[0-9]*)/i);
+        if (multiplierMatch) {
+          const m = parseFloat(multiplierMatch[1]);
+          if (m > 0) return m;
+        }
+
+        // Structured payout / exit fields
+        const exitMatch = msg.data.match(/"(?:exitMultiplier|cashoutMultiplier|payoutMultiplier)"[:\s]+([0-9]+\.?[0-9]*)/i);
+        if (exitMatch) {
+          const m = parseFloat(exitMatch[1]);
+          if (m > 0) return m;
+        }
+
+        // No reliable multiplier → do not confirm
       }
 
       return null;

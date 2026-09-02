@@ -4,6 +4,8 @@
 
 export const BC_GAME_URLS = {
   base: 'https://bc.game',
+  /** Authentication entry point — use this before navigating to Crash */
+  login: 'https://bc.game/auth/signin',
   crash: 'https://bc.game/crash',
   apiBase: 'https://api.bc.game',
 } as const;

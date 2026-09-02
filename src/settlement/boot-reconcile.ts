@@ -21,15 +21,14 @@ export interface BootReconcileResult {
  * Reconcile every non-final settlement order at boot.
  * - Evidence WIN/LOSS/VOID → settleOrder
  * - Evidence PENDING → mark RECONCILING
- * - No evidence & older than voidIfOlderMs → VOID
+ * - No evidence → keep open / reconcile later; never infer VOID from age
  * - No evidence & young → leave open (stillOpen)
  */
 export async function bootReconcileOpenOrders(
   pool: Pool,
   evidenceProvider: SettlementEvidenceProvider | null,
-  opts?: { voidIfOlderMs?: number; limit?: number }
+  opts?: { limit?: number }
 ): Promise<BootReconcileResult> {
-  const voidIfOlderMs = opts?.voidIfOlderMs ?? 15 * 60 * 1000;
   const limit = opts?.limit ?? 200;
   const engine = new AuthoritativeSettlementEngine(pool);
   const result: BootReconcileResult = { open: 0, settled: 0, voided: 0, stillOpen: 0, errors: 0 };
@@ -52,7 +51,6 @@ export async function bootReconcileOpenOrders(
   result.open = res.rowCount ?? 0;
   logger().info({ open: result.open }, 'Boot reconcile scanning open settlement orders');
 
-  const now = Date.now();
   for (const row of res.rows) {
     try {
       if (evidenceProvider) {
@@ -79,21 +77,9 @@ export async function bootReconcileOpenOrders(
         }
       }
 
-      const age = now - new Date(row.created_at).getTime();
-      if (age >= voidIfOlderMs) {
-        await engine.settleOrder({
-          clientOrderId: row.client_order_id,
-          status: 'VOID',
-          grossPayout: Number(row.wager_amount),
-          multiplier: 1,
-          settledAt: Date.now(),
-          evidence: { reason: 'boot_reconcile_deadline', ageMs: age },
-        });
-        result.voided++;
-      } else {
-        await engine.markReconciling(row.client_order_id).catch(() => undefined);
-        result.stillOpen++;
-      }
+      // No evidence is never evidence of VOID. Keep the order open and reconcile later.
+      await engine.markReconciling(row.client_order_id);
+      result.stillOpen++;
     } catch (err) {
       result.errors++;
       logger().error({ clientOrderId: row.client_order_id, error: String(err) }, 'Boot reconcile item failed');

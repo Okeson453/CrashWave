@@ -129,3 +129,19 @@ export function getMetricsContentType(): string {
 export async function getMetrics(): Promise<string> {
   return metricsRegistry.metrics();
 }
+
+export const dbPoolTotal = new Gauge({
+  name: 'crash_db_pool_total',
+  help: 'Postgres pool total connections',
+  registers: [metricsRegistry],
+});
+export const dbPoolIdle = new Gauge({
+  name: 'crash_db_pool_idle',
+  help: 'Postgres pool idle connections',
+  registers: [metricsRegistry],
+});
+export const dbPoolWaiting = new Gauge({
+  name: 'crash_db_pool_waiting',
+  help: 'Postgres pool waiting requests',
+  registers: [metricsRegistry],
+});

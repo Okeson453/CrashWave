@@ -114,12 +114,19 @@ export class BetExecutor {
         };
       }
 
-      // 3. Submit bet with retries
+      // 3. Submit bet. Retries are only allowed before any external side-effect.
+      // Once submitBet() has been called, a timeout/uncertain outcome is UNKNOWN
+      // and must be reconciled — never blindly retried.
       let lastError: string | undefined;
       let retryCount = 0;
+      let externalSideEffectAttempted = false;
 
       for (let attempt = 0; attempt <= this.config.maxPlacementRetries; attempt++) {
         if (attempt > 0) {
+          if (externalSideEffectAttempted) {
+            // Safety: never retry after an uncertain external submission
+            break;
+          }
           retryCount = attempt;
           this.logger.info(
             {
@@ -128,16 +135,21 @@ export class BetExecutor {
               attempt: attempt + 1,
               maxRetries: this.config.maxPlacementRetries + 1,
             },
-            `Retrying bet placement (attempt ${attempt + 1})`
+            `Retrying bet placement (attempt ${attempt + 1}) — pre-submission only`
           );
           await this.delay(this.config.placementRetryDelayMs * attempt);
         }
 
         try {
           const submitted = await this.adapter.submitBet(request);
+          // Physical action may have reached the platform even if we get false/timeout
+          externalSideEffectAttempted = true;
+
           if (!submitted) {
             lastError = 'Bet submission rejected by adapter';
-            continue;
+            // Rejection before network may be safe to retry; treat conservatively as UNKNOWN
+            // if we cannot prove the request never left the process.
+            break;
           }
 
           // 4. Wait for confirmation
@@ -171,7 +183,9 @@ export class BetExecutor {
               retryCount,
             };
           } else {
-            lastError = 'Bet was submitted but confirmation was not received';
+            // Submitted but no confirmation → UNKNOWN / RECONCILING
+            lastError = 'Bet was submitted but confirmation was not received (UNKNOWN)';
+            break;
           }
         } catch (error) {
           lastError = error instanceof Error ? error.message : String(error);
@@ -181,15 +195,34 @@ export class BetExecutor {
               betId: request.betId,
               attempt: attempt + 1,
               error: lastError,
+              externalSideEffectAttempted,
             },
-            'Bet placement attempt failed'
+            externalSideEffectAttempted
+              ? 'Bet placement uncertain after external attempt — will not retry'
+              : 'Bet placement attempt failed before confirmed external side-effect'
           );
+          if (externalSideEffectAttempted) {
+            break;
+          }
         }
       }
 
-      // All retries exhausted
-      const finalError = lastError ?? 'Bet placement failed after all retries';
-      await this.idempotency.fail(request.sessionId, request.roundId, finalError);
+      // After any external attempt without confirmation → UNKNOWN (reconcile), not FAILED retryable
+      const isUnknown = externalSideEffectAttempted;
+      const finalError =
+        lastError ??
+        (isUnknown
+          ? 'Bet placement outcome unknown after external submission'
+          : 'Bet placement failed after all retries');
+
+      if (isUnknown) {
+        await this.idempotency.markUnknown?.(request.sessionId, request.roundId, finalError).catch(async () => {
+          // Fallback if markUnknown not implemented
+          await this.idempotency.fail(request.sessionId, request.roundId, finalError);
+        });
+      } else {
+        await this.idempotency.fail(request.sessionId, request.roundId, finalError);
+      }
 
       this.logger.error(
         {
@@ -198,13 +231,16 @@ export class BetExecutor {
           roundId: request.roundId,
           retries: retryCount,
           error: finalError,
+          state: isUnknown ? 'UNKNOWN' : 'FAILED',
         },
-        'Bet placement failed permanently'
+        isUnknown
+          ? 'Bet placement UNKNOWN — requires authoritative reconciliation before any new action'
+          : 'Bet placement failed permanently'
       );
 
       return {
         placed: false,
-        state: 'FAILED',
+        state: isUnknown ? 'UNKNOWN' : 'FAILED',
         error: finalError,
         attemptedAt,
         confirmedAt: null,
@@ -253,65 +289,5 @@ export class BetExecutor {
   }
 }
 
-/**
- * Mock bet placement adapter for testing and dry-run mode.
- */
-export class MockBetPlacementAdapter implements BetPlacementAdapter {
-  private shouldConfirm = true;
-  private confirmDelayMs = 0;
-  private shouldFailSubmission = false;
-  private cashOutResult: { success: boolean; multiplier?: number; pnl?: number } = {
-    success: true,
-    multiplier: 1.3,
-    pnl: 210,
-  };
-
-  setBehavior(options: {
-    shouldConfirm?: boolean;
-    confirmDelayMs?: number;
-    shouldFailSubmission?: boolean;
-    cashOutSuccess?: boolean;
-    cashOutMultiplier?: number;
-    cashOutPnl?: number;
-  }): void {
-    if (options.shouldConfirm !== undefined) this.shouldConfirm = options.shouldConfirm;
-    if (options.confirmDelayMs !== undefined) this.confirmDelayMs = options.confirmDelayMs;
-    if (options.shouldFailSubmission !== undefined) this.shouldFailSubmission = options.shouldFailSubmission;
-    if (options.cashOutSuccess !== undefined) this.cashOutResult.success = options.cashOutSuccess;
-    if (options.cashOutMultiplier !== undefined) this.cashOutResult.multiplier = options.cashOutMultiplier;
-    if (options.cashOutPnl !== undefined) this.cashOutResult.pnl = options.cashOutPnl;
-  }
-
-  async submitBet(_request: PlaceBetRequest): Promise<boolean> {
-    if (this.shouldFailSubmission) return false;
-    return true;
-  }
-
-  async waitForConfirmation(_betId: string, _timeoutMs: number): Promise<boolean> {
-    if (this.confirmDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.confirmDelayMs));
-    }
-    return this.shouldConfirm;
-  }
-
-  async requestCashOut(_betId: string, _roundId: string): Promise<boolean> {
-    return this.cashOutResult.success;
-  }
-
-  async waitForCashOutConfirmation(_betId: string, _timeoutMs: number): Promise<{
-    success: boolean;
-    multiplier: number | null;
-    pnl: number | null;
-    error?: string;
-  }> {
-    if (this.confirmDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.confirmDelayMs));
-    }
-    return {
-      success: this.cashOutResult.success,
-      multiplier: this.cashOutResult.multiplier ?? null,
-      pnl: this.cashOutResult.pnl ?? null,
-      error: this.cashOutResult.success ? undefined : 'Cash-out failed',
-    };
-  }
-}
+/** @deprecated import from '@/betting/adapters/mock' */
+export { MockBetPlacementAdapter } from './adapters/mock.js';

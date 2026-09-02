@@ -1,7 +1,9 @@
 /**
- * VOID-after-deadline reconciler
- * Orders stuck in DISPATCHED / PENDING_SETTLEMENT / RECONCILING past T_reconcile
- * without remote evidence → VOID (credit exposure back via settleOrder status VOID).
+ * Settlement reconciler — durable UNKNOWN/RECONCILING semantics.
+ *
+ * Orders stuck in DISPATCHED / PENDING_SETTLEMENT / RECONCILING past deadline
+ * are marked RECONCILING and left for operator/provider resolution.
+ * Absence of evidence is NEVER treated as proof of VOID.
  */
 import type { Pool } from 'pg';
 import { getLogger } from '../observability/logger';
@@ -11,7 +13,7 @@ import type { SettlementEvidenceProvider } from '../settlement/evidence-provider
 const logger = () => getLogger().child({ component: 'SettlementReconciler' });
 
 export interface ReconcilerConfig {
-  /** Max age of non-final orders before VOID (ms) */
+  /** Age after which non-final orders enter RECONCILING (ms) */
   reconcileDeadlineMs: number;
   pollIntervalMs: number;
   enabled: boolean;
@@ -53,10 +55,11 @@ export class SettlementReconciler {
     }
   }
 
-  async tick(): Promise<{ processed: number; voided: number; settled: number }> {
+  async tick(): Promise<{ processed: number; voided: number; settled: number; reconciling: number }> {
     let processed = 0;
     let voided = 0;
     let settled = 0;
+    let reconciling = 0;
 
     const cutoff = new Date(Date.now() - this.config.reconcileDeadlineMs);
     const res = await this.pool.query<{
@@ -83,42 +86,43 @@ export class SettlementReconciler {
             clientOrderId: row.client_order_id,
           });
           if (ev && (ev.status === 'WIN' || ev.status === 'LOSS' || ev.status === 'VOID')) {
+            // Only VOID when evidence explicitly proves no external execution
             await this.engine.settleOrder({
               clientOrderId: row.client_order_id,
               status: ev.status,
-              grossPayout: ev.grossPayout ?? (ev.status === 'WIN' ? Number(row.wager_amount) : 0),
+              grossPayout:
+                ev.grossPayout ??
+                (ev.status === 'WIN' ? Number(row.wager_amount) : ev.status === 'VOID' ? Number(row.wager_amount) : 0),
               multiplier: Math.max(1, ev.multiplier ?? 1),
               settledAt: Date.now(),
               externalReference: ev.externalTxRef ?? ev.externalBetId,
               evidence: { source: ev.source, raw: ev.raw },
             });
-            settled++;
+            if (ev.status === 'VOID') voided++;
+            else settled++;
             logger().info(
               { clientOrderId: row.client_order_id, status: ev.status },
-              'Reconciler settled from evidence'
+              'Reconciler settled from authoritative evidence'
             );
             continue;
           }
           if (ev && ev.status === 'PENDING') {
             await this.engine.markReconciling(row.client_order_id);
+            reconciling++;
             continue;
           }
         }
 
-        // No evidence after deadline → VOID
-        await this.engine.settleOrder({
-          clientOrderId: row.client_order_id,
-          status: 'VOID',
-          grossPayout: Number(row.wager_amount), // return exposure to hot wallet conceptually
-          multiplier: 1,
-          settledAt: Date.now(),
-          evidence: { reason: 'reconcile_deadline_exceeded' },
-        });
-        voided++;
-        logger().warn(
-          { clientOrderId: row.client_order_id, ageCutoff: cutoff.toISOString() },
-          'Order VOIDED after reconcile deadline'
-        );
+        // No evidence after deadline → durable RECONCILING (UNKNOWN).
+        // Never equate absence of evidence with VOID.
+        if (row.status !== 'RECONCILING') {
+          await this.engine.markReconciling(row.client_order_id);
+          reconciling++;
+          logger().warn(
+            { clientOrderId: row.client_order_id, ageCutoff: cutoff.toISOString() },
+            'Order marked RECONCILING — no authoritative evidence after deadline (requires operator/provider resolution)'
+          );
+        }
       } catch (err) {
         logger().error(
           { clientOrderId: row.client_order_id, error: String(err) },
@@ -128,8 +132,8 @@ export class SettlementReconciler {
     }
 
     if (processed > 0) {
-      logger().info({ processed, settled, voided }, 'Reconciler tick complete');
+      logger().info({ processed, settled, voided, reconciling }, 'Reconciler tick complete');
     }
-    return { processed, settled, voided };
+    return { processed, settled, voided, reconciling };
   }
 }

@@ -157,19 +157,19 @@ export interface TypedSystemEvent<T extends SystemEventType = SystemEventType> e
   payload: T extends keyof EventPayloadMap ? EventPayloadMap[T] : unknown;
 }
 
-export function createEvent<T extends SystemEventType>(
+export function createEvent<T extends keyof EventPayloadMap>(
   type: T,
   payload: EventPayloadMap[T],
   metadata: EventMetadata
-): TypedSystemEvent<T> {
+): TypedSystemEvent<T & SystemEventType> {
   return {
     id: generateEventId(),
-    type,
+    type: type as T & SystemEventType,
     payload,
     timestamp: new Date().toISOString(),
     correlationId: metadata.correlationId,
     source: metadata.source,
-  } as TypedSystemEvent<T>;
+  } as TypedSystemEvent<T & SystemEventType>;
 }
 
 function generateEventId(): string {

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { BrowserManager } from '../browser/manager';
+// BrowserManager is loaded dynamically for live mode (single-process dry-run doesn't need it).
 import { GameAdapter } from '../game/adapter';
 import { RoundObserver } from '../game/observer';
 import { SessionRepository } from '../persistence/repositories/session-repo';
@@ -16,7 +16,7 @@ export type SystemMode = 'observe-only' | 'dry-run' | 'live' | 'maintenance';
 
 export interface OrchestratorOptions {
   config: AppConfig;
-  browserManager: BrowserManager;
+  browserManager: unknown;
   gameAdapter: GameAdapter;
   roundObserver: RoundObserver;
   sessionRepo: SessionRepository;

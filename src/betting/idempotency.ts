@@ -175,6 +175,48 @@ export class IdempotencyKeyStore {
   }
 
   /**
+   * Mark a reserved key as UNKNOWN after an external side-effect with
+   * uncertain outcome. Keys in UNKNOWN must not be retried; reconcile first.
+   * Uses a longer TTL so the reservation blocks duplicate actions during reconciliation.
+   */
+  async markUnknown(sessionId: string, roundId: string, reason: string): Promise<void> {
+    const key = IdempotencyKeyStore.generateKey(sessionId, roundId);
+    const redis = getRedisClient();
+    const prefixed = prefixKey(`idempotency:${key}`);
+
+    try {
+      const existing = await redis.get(prefixed);
+      if (!existing) {
+        this.logger.warn(
+          { component: 'Idempotency', sessionId, roundId },
+          'Cannot mark UNKNOWN — idempotency key not found'
+        );
+        return;
+      }
+
+      const record: IdempotencyRecord = {
+        ...JSON.parse(existing),
+        status: 'UNKNOWN' as IdempotencyStatus,
+        result: { success: false, error: reason },
+      };
+
+      // Longer TTL: block re-dispatch while operator/reconciler resolves
+      const unknownTtl = Math.max(this.config.ttlMs, 30 * 60 * 1000);
+      await redis.set(prefixed, JSON.stringify(record), 'PX', unknownTtl);
+      this.logger.warn(
+        { component: 'Idempotency', sessionId, roundId, reason },
+        'Idempotency key marked UNKNOWN — reconcile before any new action'
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        { component: 'Idempotency', sessionId, roundId, error: message },
+        'Failed to mark idempotency key as UNKNOWN'
+      );
+    }
+  }
+
+  /**
    * Get the record for a given session+round.
    */
   async getRecord(sessionId: string, roundId: string): Promise<IdempotencyRecord | null> {
@@ -319,6 +361,15 @@ export class InMemoryIdempotencyStore extends IdempotencyKeyStore {
     const record = this.store.get(key);
     if (record) {
       record.status = 'FAILED';
+      record.result = { success: false, error: reason };
+    }
+  }
+
+  override async markUnknown(sessionId: string, roundId: string, reason: string): Promise<void> {
+    const key = IdempotencyKeyStore.generateKey(sessionId, roundId);
+    const record = this.store.get(key);
+    if (record) {
+      record.status = 'UNKNOWN';
       record.result = { success: false, error: reason };
     }
   }

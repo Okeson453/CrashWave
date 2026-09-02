@@ -1,6 +1,13 @@
 import { getRedisClient, createRedisClient } from '../../../src/persistence/redis-client';
 
-describe('Redis Connection Integration', () => {
+// These tests require a running Redis instance. In CI and personal
+// dev environments without Redis available, they are skipped to keep
+// the unit/simulation suite fast. Set INTEGRATION_REDIS=1 to enable.
+const redisEnabled = process.env.INTEGRATION_REDIS === '1' || process.env.RUN_REDIS_TESTS === '1';
+
+const d = redisEnabled ? describe : describe.skip;
+
+d('Redis Connection Integration', () => {
   let client: ReturnType<typeof getRedisClient>;
 
   beforeAll(() => {

@@ -1,14 +1,22 @@
 system:
-  mode: dry-run
+  mode: dry-run                # observe-only | dry-run | live | maintenance
   logLevel: info
-  serviceName: bc-game-crash-automation
+  serviceName: personal-bc-automation
 
 betting:
   stakePerEntry: 700
   cashOutTarget: 1.30
-  maxDailyEntries: 100
+  maxDailyEntries: 500
   currencyUnit: units
   dayBoundaryTimezone: UTC
+
+dryRun:
+  stake: 700
+  target: 1.30
+  initialVirtualBalance: 10000
+  maxDailyVirtualTrades: 500
+  minProbability: 0.35
+  minConfidence: 0.30
 
 risk:
   minBalanceForEntry: 700
@@ -16,16 +24,19 @@ risk:
   maxConsecutiveErrorsBeforeStop: 3
   maxCashOutFailuresBeforeStop: 2
   cooldownMs: 5000
+  minPredictionProbability: 0.35
+  minPredictionConfidence: 0.30
+  requirePredictionForLive: true
 
 observation:
   maxTickLatencyMs: 1000
-  minConfidenceForEntry: high
+  minConfidenceForEntry: medium
   requireRoundId: true
   latencyThresholdHealthyMs: 500
   latencyThresholdDegradedMs: 1000
 
 telegram:
-  allowedUserIds: []
+  allowedUserIds: []            # set via APP_TELEGRAM__ALLOWED_USER_IDS env
   verbosity: normal
   sendRoundStart: false
   sendRoundResult: true
@@ -33,18 +44,26 @@ telegram:
   rateLimitMessagesPerMinute: 30
 
 browser:
-  headless: false
+  headless: true
   viewportWidth: 1366
   viewportHeight: 900
   profileDirectory: ./secrets/browser-profile
   timeoutMs: 30000
+  stealthLevel: standard       # off | minimal | standard | full
 
 persistence:
-  databasePoolSize: 10
-  redisCommandTimeoutMs: 5000
-  redisReconnectIntervalMs: 3000
+  databasePoolSize: 5          # personal use — single process, 5 is plenty
+  idleTimeoutMillis: 30000
+  connectionTimeoutMillis: 5000
+  queryTimeoutMillis: 15000
 
 health:
   checkIntervalMs: 30000
   degradationThreshold: 2
   failureThreshold: 3
+
+proxy:                          # optional, single proxy (no pool/rotation in v1)
+  enabled: false
+  server: null
+  username: null
+  password: null
