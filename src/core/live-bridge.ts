@@ -14,6 +14,8 @@ import { getLogger } from '../observability/logger';
 
 const logger = getLogger().child({ component: 'LiveBridge' });
 
+const openLiveBets = new Set<string>();
+
 export interface LiveBridgeDeps {
   config: AppConfig;
   entryDecisionService: EntryDecisionService;
@@ -118,6 +120,7 @@ export async function onRoundStartedForLive(
     });
     const result = await deps.liveBetExecutor.placeLiveBet(req);
     if (result.placed) {
+      openLiveBets.add(roundId);
       deps.liveCashOutExecutor?.setTarget(Number(decision.signal.target ?? target));
       logger.info({ roundId, betId: result.betId, latencyMs: result.latencyMs }, 'Live bet accepted');
     } else {
@@ -140,5 +143,14 @@ export async function onRoundCrashedForLive(
     deps.entryDecisionService.observeCrash(rid, cp);
   } catch (err) {
     logger.debug({ error: String(err) }, 'observeCrash failed');
+  }
+  if (openLiveBets.has(rid) && deps.liveCashOutExecutor) {
+    openLiveBets.delete(rid);
+    try {
+      await deps.liveCashOutExecutor.cashOut(rid, rid, false);
+      logger.info({ roundId: rid, crashPoint: cp }, 'Live cash-out triggered on crash');
+    } catch (err) {
+      logger.debug({ roundId: rid, error: String(err) }, 'Live cash-out failed');
+    }
   }
 }

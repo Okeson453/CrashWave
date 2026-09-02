@@ -7,6 +7,7 @@
 
 import { MiddlewareFn } from 'telegraf';
 import { getLogger } from '../observability/logger';
+import { LoginOutcome } from '../core/session-supervisor';
 import {
   OperatorContext,
   ParsedCommand,
@@ -46,15 +47,7 @@ export interface RouterDependencies {
   unsheathSystem?: () => Promise<boolean>;
   getSheathState?: () => { state: string; bettingSuspended: boolean; triggers: string[] };
   /** Secure one-shot BC.Game login (password never stored) */
-  loginWithCredentials?: (email: string, password: string) => Promise<{
-    ok: boolean;
-    authenticated: boolean;
-    regionBlocked?: boolean;
-    gameLoaded?: boolean;
-    observing?: boolean;
-    detail?: string;
-    maskedEmail?: string;
-  }>;
+  loginWithCredentials?: (email: string, password: string) => Promise<LoginOutcome>;
   // tenantRuntimeFactory removed for personal use
 }
 

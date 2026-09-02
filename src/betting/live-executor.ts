@@ -11,7 +11,7 @@ import { DOM_SELECTORS } from '../game/constants';
 import { BetRepository } from '../persistence/repositories/bet-repo';
 import { realExecutionBlockReason } from './execution-mode-gate';
 import { IdempotencyKeyStore, InMemoryIdempotencyStore } from './idempotency';
-import type { PlaceBetRequest, BetExecutionResult } from './types';
+import type { PlaceBetRequest } from './types';
 import type { BetState } from '../types/betting';
 
 export interface LiveBetResult {

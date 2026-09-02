@@ -30,6 +30,7 @@ import { DEFAULT_THROTTLE_POLICIES } from '../telegram/types';
 import { PredictionEngine } from '../prediction/prediction-engine';
 import { EntryDecisionService } from '../prediction/entry-decision-service';
 import { prewarmPredictionStack } from '../prediction/prewarm';
+import { setPrewarmResult } from '../observability/readiness';
 import { DecisionEngine } from '../decision/decision-engine';
 import { OpportunityRanker } from '../opportunity/ranker';
 import { RiskEngine } from '../betting/risk-engine';
@@ -329,39 +330,62 @@ export function composeApplication(config: AppConfig): CompositionHandles {
           },
         };
       },
-      getWindowedAnalytics: (_amount: number, _unit: string) => ({
-        signals: runtime.recentTrades.length,
-        signalsAccepted: runtime.recentTrades.filter((t) => t.status !== 'OPEN').length,
-        signalsRejected: 0,
-        avgProbability: 0,
-        avgConfidence: 0,
-        expectedValue: 0,
-        regime: 'normal',
-        modelVersion: 'v1',
-      }),
+      getWindowedAnalytics: (_amount: number, _unit: string) => {
+        const trades = runtime.recentTrades;
+        const resolved = trades.filter((t) => t.status !== 'OPEN');
+        const avgProb = resolved.length > 0
+          ? resolved.reduce((s, t) => s + Number(t.probability ?? 0), 0) / resolved.length
+          : 0;
+        const avgConf = resolved.length > 0
+          ? resolved.reduce((s, t) => s + Number(t.confidence ?? 0), 0) / resolved.length
+          : 0;
+        const totalStake = resolved.reduce((s, t) => s + Number(t.stake ?? 0), 0);
+        const totalPnl = resolved.reduce((s, t) => s + Number(t.pnl ?? 0), 0);
+        const ev = totalStake > 0 ? totalPnl / totalStake : 0;
+        return {
+          signals: trades.length,
+          signalsAccepted: resolved.length,
+          signalsRejected: 0,
+          avgProbability: avgProb,
+          avgConfidence: avgConf,
+          expectedValue: ev,
+          regime: 'normal',
+          modelVersion: 'v1',
+        };
+      },
       setSystemMode: async (mode: string) => {
         const valid = ['observe-only', 'dry-run', 'live', 'maintenance'];
         if (!valid.includes(mode)) return false;
         runtime.currentMode = mode as AppConfig['system']['mode'];
+        (config.system as unknown as { mode: string }).mode = mode as AppConfig['system']['mode'];
         if (mode === 'live') {
           runtime.halted = false;
           runtime.haltReason = undefined;
         }
         return true;
       },
-      pauseSystem: async (_reason: string) => {
+      pauseSystem: async (reason: string) => {
         runtime.halted = true;
-        runtime.haltReason = _reason;
+        runtime.haltReason = reason;
+        try { await dryRunController.stop(); } catch { /* ignore */ }
+        try { await sessionSupervisor.stop(); } catch { /* ignore */ }
         return true;
       },
       resumeSystem: async () => {
         runtime.halted = false;
         runtime.haltReason = undefined;
+        try { await sessionSupervisor.start(); } catch { /* ignore */ }
+        try { dryRunController.start(runtime.sessionId); } catch { /* ignore */ }
         return true;
       },
       stopSystem: async () => {
         runtime.halted = true;
         runtime.haltReason = 'stopped';
+        try { await dryRunController.stop(); } catch { /* ignore */ }
+        try { await sessionSupervisor.stop(); } catch { /* ignore */ }
+        if (telegramGateway) {
+          try { await telegramGateway.stop(); } catch { /* ignore */ }
+        }
         return true;
       },
       getConfigValue: (key: string) => {
@@ -373,7 +397,28 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         }
         return v;
       },
-      setConfigValue: async (_key: string, _value: string) => true,
+      setConfigValue: async (key: string, value: string) => {
+        const parts = key.split('.');
+        let target: Record<string, unknown> = config as unknown as Record<string, unknown>;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const p = parts[i];
+          if (!target[p] || typeof target[p] !== 'object') return false;
+          target = target[p] as Record<string, unknown>;
+        }
+        const last = parts[parts.length - 1];
+        const num = Number(value);
+        if (last === 'stakePerEntry' || last === 'cashOutTarget' || last === 'maxDailyEntries') {
+          if (!Number.isFinite(num) || num <= 0) return false;
+          (target as Record<string, unknown>)[last] = num;
+        } else if (last === 'mode') {
+          const valid = ['observe-only', 'dry-run', 'live', 'maintenance'];
+          if (!valid.includes(value)) return false;
+          (target as Record<string, unknown>)[last] = value;
+        } else {
+          (target as Record<string, unknown>)[last] = value;
+        }
+        return true;
+      },
       sheathSystem: async () => true,
       unsheathSystem: async () => true,
       getSheathState: () => ({ state: 'armed', bettingSuspended: false, triggers: [] }),
@@ -381,8 +426,9 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         // SessionSupervisor: preflight → launch/reuse browser → login pipeline →
         // encrypt session → navigate to Crash → start observation. Browser stays
         // alive. Password is scoped to the call and never logged/persisted.
+        let outcome: Awaited<ReturnType<typeof sessionSupervisor.loginWithCredentials>> | undefined;
         try {
-          const outcome = await sessionSupervisor.loginWithCredentials(email, password);
+          outcome = await sessionSupervisor.loginWithCredentials(email, password);
           logger.info(
             {
               component: 'Composition',
@@ -405,6 +451,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
             '/login handler threw'
           );
           return {
+            ...(outcome ?? {}),
             ok: false,
             authenticated: false,
             detail: `LOGIN_HANDLER_ERROR: ${message}`.slice(0, 600),
@@ -623,6 +670,12 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     // F012: pre-warm prediction stack from DB history (fail-soft if empty DB)
     try {
       const warm = await prewarmPredictionStack(entryDecisionService, 500);
+      setPrewarmResult({
+        stateWarm: warm.stateWarm ?? true,
+        calibrationWarm: warm.calibrationWarm ?? true,
+        historyRounds: warm.historyRounds,
+        acieHistorySize: warm.acieHistorySize,
+      });
       logger.info(
         {
           component: 'Composition',
@@ -635,6 +688,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         'Prediction stack prewarm completed'
       );
     } catch (err) {
+      setPrewarmResult(null, err instanceof Error ? err.message : String(err));
       logger.warn(
         { component: 'Composition', error: String(err) },
         'Prediction prewarm failed (live entries remain fail-closed until warm)'
