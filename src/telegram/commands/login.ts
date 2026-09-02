@@ -51,7 +51,10 @@ export function createLoginHandlers(_deps: RouterDependencies): Map<string, Comm
     if (!chatId) return reply(false, 'No chat id; cannot start login conversation.');
 
     pending.set(chatId, { chatId, step: 'email', createdAt: Date.now() });
-    return reply(true, 'Send your BC.Game *email* (next message).\n\nSend /login_cancel to abort.');
+    // Plain text. The previous Markdown version (`*email*`) was rejected by
+    // Telegram and stripped by the parse-failure fallback, so the operator
+    // saw inconsistent formatting. Plain text is simpler and reliable.
+    return reply(true, 'Send your BC.Game email (next message).\n\nSend /login_cancel to abort.');
   });
 
   handlers.set('/login_cancel', async (ctx: OperatorContext): Promise<CommandResult> => {
@@ -81,7 +84,10 @@ export async function handleLoginConversationText(
 
   if (p.step === 'email') {
     pending.set(chatId, { ...p, step: 'password', email: text.trim(), createdAt: Date.now() });
-    await ctx.reply('Now send your BC.Game *password* (next message).\n\nSend /login_cancel to abort.', { parse_mode: 'Markdown' });
+    // Plain text — the previous Markdown version caused "Internal Error" when
+    // Telegram rejected parse_mode on `*password*`; the conversation interceptor
+    // has no Markdown fallback (the global catch handler is too coarse).
+    await ctx.reply('Now send your BC.Game password (next message).\n\nSend /login_cancel to abort.');
     return true;
   }
 
@@ -107,8 +113,7 @@ export async function handleLoginConversationText(
           `region blocked: ${result.regionBlocked ? 'yes' : 'no'}`,
           `game loaded: ${result.gameLoaded ? 'yes' : 'no'}`,
           `observing: ${result.observing ? 'yes' : 'no'}`,
-        ].join('\n'),
-        { parse_mode: 'Markdown' }
+        ].join('\n')
       );
     } else {
       await ctx.reply(`❌ Login failed: ${result.detail ?? 'unknown error'}`);
