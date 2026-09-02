@@ -199,9 +199,14 @@ export class BrowserManager {
           `BROWSER_LAUNCH_FAILED: Chromium needs a display but none is available (${message}). ` +
           'In Docker set browser.headless=true (or BROWSER_HEADLESS=1). Do not use headed mode without Xvfb.';
       } else if (missingBrowser) {
+        const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+        const pathHint = browsersPath
+          ? ` PLAYWRIGHT_BROWSERS_PATH=${browsersPath} points to a directory without browsers.`
+          : '';
         detail =
-          `BROWSER_LAUNCH_FAILED: Playwright/Chromium missing or version mismatch (${message}). ` +
-          'Pin package playwright and Docker image mcr.microsoft.com/playwright to the same version (1.62.1).';
+          `BROWSER_LAUNCH_FAILED: Playwright/Chromium executable not found.${pathHint} ` +
+          'Run: npx playwright install chromium\n' +
+          'Original error: ' + message;
       } else {
         detail = `Browser launch failed: ${message}`;
       }
