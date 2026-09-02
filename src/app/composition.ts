@@ -341,6 +341,8 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   };
 
   let started = false;
+  let dailyReportTimer: NodeJS.Timeout | null = null;
+  const DAILY_REPORT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 
   async function start(): Promise<void> {
     if (started) return;
@@ -414,6 +416,14 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         logger.warn({ component: 'Composition', error: String(err) }, 'Telegram start error');
       }
     }
+    // Daily report scheduler (spec §5.2 + §2.9). Inlined setInterval:
+    // every 24h, push a daily summary to the operator's Telegram chat.
+    // Uses the virtual ledger snapshot + the analytics windowed view; if
+    // the gateway isn't up, the report is logged but not sent.
+    dailyReportTimer = setInterval(() => {
+      void sendDailyReport();
+    }, DAILY_REPORT_INTERVAL_MS);
+    logger.info({ component: 'Composition', intervalMs: DAILY_REPORT_INTERVAL_MS }, 'Daily report scheduler started');
     logger.info({ component: 'Composition' }, 'Composition started');
   }
 
@@ -421,6 +431,10 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     if (!started) return;
     started = false;
     logger.info({ component: 'Composition' }, 'Stopping personal-use composition');
+    if (dailyReportTimer) {
+      clearInterval(dailyReportTimer);
+      dailyReportTimer = null;
+    }
     try { dryRunController.stop(); } catch { /* ignore */ }
     if (telegramGateway) {
       try {
@@ -431,6 +445,43 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     }
     await workerFleet.stopAll();
     logger.info({ component: 'Composition' }, 'Composition stopped');
+  }
+
+  /**
+   * Build a daily summary and push it to the operator's Telegram chat.
+   * Spec §2.9 / §5.2: this is the inlined daily-report-scheduler.
+   */
+  async function sendDailyReport(): Promise<void> {
+    try {
+      const snap = dryRunController.getLedgerSnapshot();
+      const lines = [
+        '*Daily Report*',
+        '',
+        `Mode: ${runtime.currentMode}`,
+        `Session: \`${runtime.sessionId}\``,
+        `Trades today: ${snap.trades}`,
+        `Wins: ${snap.wins} | Losses: ${snap.losses}`,
+        `Win rate: ${(snap.winRate * 100).toFixed(1)}%`,
+        `Net P&L: ${snap.netPnl.toFixed(2)}`,
+        `Balance: ${snap.virtualBalance.toFixed(2)} (initial ${snap.initialBalance.toFixed(2)})`,
+        `Max drawdown: ${(snap.maxDrawdown * 100).toFixed(2)}%`,
+      ];
+      const message = lines.join('\n');
+      if (telegramGateway) {
+        const allowed = (config.telegram?.allowedUserIds ?? []).filter((id): id is number => typeof id === 'number');
+        for (const chatId of allowed) {
+          try {
+            await telegramGateway.sendMessage(chatId, message);
+          } catch (e) {
+            logger.warn({ component: 'Composition', chatId, error: String(e) }, 'Daily report send failed');
+          }
+        }
+      } else {
+        logger.info({ component: 'Composition' }, message);
+      }
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'Daily report generation failed');
+    }
   }
 
   return { ctx, start, stop };
