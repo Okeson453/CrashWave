@@ -29,6 +29,7 @@ import { TelegramBotConfig } from '../telegram/types';
 import { DEFAULT_THROTTLE_POLICIES } from '../telegram/types';
 import { PredictionEngine } from '../prediction/prediction-engine';
 import { EntryDecisionService } from '../prediction/entry-decision-service';
+import { prewarmPredictionStack } from '../prediction/prewarm';
 import { DecisionEngine } from '../decision/decision-engine';
 import { OpportunityRanker } from '../opportunity/ranker';
 import { RiskEngine } from '../betting/risk-engine';
@@ -122,6 +123,9 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   const predictionEngine = new PredictionEngine();
   const entryDecisionService = new EntryDecisionService({
     predictionEngine,
+    riskEngine,
+    predictionRepo,
+    roundRepo,
     decisionRanker: opportunityRanker as never,
   });
   const sheathMode = new SheathMode();
@@ -208,7 +212,43 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   workerFleet.register(new SettlementWorker());
   workerFleet.register(new RiskWorker({
     riskEngine,
-    buildRiskInput: () => ({} as never),
+    buildRiskInput: (payload) => ({
+      mode: config.system.mode as 'observe-only' | 'dry-run' | 'live' | 'maintenance',
+      operatorAuthorized: true,
+      sessionAuthenticated: config.system.mode === 'dry-run' || config.system.mode === 'observe-only',
+      gameLoaded: true,
+      roundState: payload?.roundId
+        ? {
+            phase: 'crashed' as const,
+            roundId: String(payload.roundId),
+            currentMultiplier: Number(payload.crashPoint ?? 1),
+            crashPoint: Number(payload.crashPoint ?? 0) || null,
+            startedAt: null,
+            lastTickAt: null,
+            crashedAt: new Date().toISOString(),
+            confidence: 'medium' as const,
+            source: 'dom' as const,
+          }
+        : null,
+      currentBalance: 0,
+      dailyEntriesConfirmed: 0,
+      paused: false,
+      killSwitch: false,
+      browserHealthy: true,
+      gameAdapterHealthy: true,
+      openBetExists: false,
+      cooldownElapsed: true,
+      requiredStake: config.betting.stakePerEntry,
+      balanceBuffer: config.risk.balanceBuffer,
+      maxDailyEntries: config.betting.maxDailyEntries,
+      minConfidenceForEntry: 'medium' as const,
+      consecutiveErrors: 0,
+      maxConsecutiveErrors: config.risk.maxConsecutiveErrorsBeforeStop,
+      cashOutFailures: 0,
+      maxCashOutFailures: config.risk.maxCashOutFailuresBeforeStop,
+      minPredictionProbability: config.risk.minPredictionProbability,
+      minPredictionConfidence: config.risk.minPredictionConfidence,
+    }),
   }));
   workerFleet.register(new ValidationWorker());
   workerFleet.register(new RegimeWorker());
@@ -580,7 +620,74 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       );
     }
 
+    // F012: pre-warm prediction stack from DB history (fail-soft if empty DB)
+    try {
+      const warm = await prewarmPredictionStack(entryDecisionService, 500);
+      logger.info(
+        {
+          component: 'Composition',
+          historyRounds: warm.historyRounds,
+          acieHistorySize: warm.acieHistorySize,
+          stateWarm: warm.stateWarm,
+          calibrationWarm: warm.calibrationWarm,
+          durationMs: warm.durationMs,
+        },
+        'Prediction stack prewarm completed'
+      );
+    } catch (err) {
+      logger.warn(
+        { component: 'Composition', error: String(err) },
+        'Prediction prewarm failed (live entries remain fail-closed until warm)'
+      );
+    }
+
     await workerFleet.startAll();
+
+    // F011: feed background workers + rolling history from live crash points
+    try {
+      const mkCtx = (roundId: string) => ({
+        tenantId: null as string | null,
+        correlationId: roundId,
+        eventId: `evt-${roundId}-${Date.now()}`,
+        receivedAt: new Date().toISOString(),
+      });
+      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number; crashedAt?: string } }) => {
+        const p = ev?.payload;
+        if (!p?.roundId || p.crashPoint == null || !Number.isFinite(Number(p.crashPoint))) return;
+        const crashPoint = Number(p.crashPoint);
+        const roundId = String(p.roundId);
+        const ctx = mkCtx(roundId);
+        const payload = { type: 'crash', roundId, crashPoint, multiplier: crashPoint, at: p.crashedAt };
+
+        const hist = entryDecisionService.getHistoricalDataService();
+        hist.onRoundCompleted({
+          id: roundId,
+          externalRoundId: roundId,
+          sessionId: runtime.sessionId,
+          startedAt: null,
+          crashedAt: p.crashedAt ?? new Date().toISOString(),
+          crashPoint,
+          observationSource: 'session-supervisor',
+          dataQuality: 'medium',
+          createdAt: new Date().toISOString(),
+        });
+        try {
+          entryDecisionService.observeCrash(roundId, crashPoint);
+        } catch { /* ignore */ }
+
+        for (const name of ['regime-1', 'analytics-1', 'learning-1', 'validation-1', 'settlement-1', 'risk-1']) {
+          const w = workerFleet.get(name);
+          if (!w || !w.isRunning) continue;
+          void w.process(payload, ctx).catch((e: unknown) =>
+            logger.debug({ component: 'Composition', worker: name, error: String(e) }, 'worker process skipped')
+          );
+        }
+      });
+      logger.info({ component: 'Composition' }, 'Worker feed + history buffer wired to RoundCrashed');
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'Worker feed wire skipped');
+    }
+
     if (telegramGateway && telegramEnabled) {
       try {
         await telegramGateway.start();
