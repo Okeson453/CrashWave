@@ -25,7 +25,7 @@ RUN npm ci --omit=dev
 COPY config.yaml ./
 COPY tsconfig.json tsconfig.build.json ./
 COPY src/ ./src/
-RUN npm install --no-save typescript@5.9.3 \
+RUN npm install --no-save typescript@5.9.3 @types/node@22.10.5 @types/jest@29.5.14 \
  && npx tsc -p tsconfig.build.json \
  && npm cache clean --force
 
