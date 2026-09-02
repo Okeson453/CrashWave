@@ -469,6 +469,14 @@ export class SessionSupervisor {
     if (ctx && this.browserSession) {
       const restored = await this.browserSession.restoreIfAvailable(ctx);
       this.logger.info({ restored }, 'Session restore attempt finished');
+      if (restored) {
+        try {
+          await this.browserSession.captureAndSave(ctx);
+          this.logger.info('Refreshed session state persisted after restore');
+        } catch (err) {
+          this.logger.warn({ error: String(err) }, 'Post-restore session capture failed (non-fatal)');
+        }
+      }
     }
   }
 

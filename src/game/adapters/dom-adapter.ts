@@ -77,7 +77,7 @@ export class DOMAdapter {
 
   private async setupMutationObserver(): Promise<void> {
     try {
-      await (this.options.page as any).evaluateOnNewDocument((selectors: any) => {
+      await (this.options.page as any).addInitScript((selectors: any) => {
         window.addEventListener('DOMContentLoaded', () => {
           const container = document.querySelector(selectors.gameContainer);
           if (!container) return;

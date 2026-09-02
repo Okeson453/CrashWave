@@ -78,7 +78,7 @@ export class WSInterceptor {
 
   private async injectInterceptor(): Promise<void> {
     try {
-      await (this.options.page as any).evaluateOnNewDocument(() => {
+      await (this.options.page as any).addInitScript(() => {
         // Store original WebSocket
         const OriginalWebSocket = window.WebSocket;
 

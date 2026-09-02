@@ -1,6 +1,7 @@
 import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { getLogger } from '../observability/logger';
 import { withRetry } from '../utils/retry';
+import { refreshPoolMetrics } from './pool-metrics';
 
 export interface DatabaseConfig {
   connectionString: string;
@@ -11,6 +12,8 @@ export interface DatabaseConfig {
 }
 
 let pool: Pool | null = null;
+let poolMetricsTimer: NodeJS.Timeout | null = null;
+const POOL_METRICS_INTERVAL_MS = 5_000;
 
 /**
  * Normalize DATABASE_URL SSL params so pg-connection-string does not emit the
@@ -92,6 +95,13 @@ export function createPool(config: DatabaseConfig): Pool {
     getLogger().debug({ component: 'Database' }, 'New database connection established');
   });
 
+  // Surface DB pool stats to the Prometheus gauges on a timer (scrape-equivalent).
+  if (!poolMetricsTimer) {
+    poolMetricsTimer = setInterval(refreshPoolMetrics, POOL_METRICS_INTERVAL_MS);
+    (poolMetricsTimer as NodeJS.Timeout).unref();
+  }
+  refreshPoolMetrics();
+
   return pool;
 }
 
@@ -107,16 +117,20 @@ export function getPoolStats(): {
   total: number;
   idle: number;
   waiting: number;
+  active: number;
 } {
   const p = getPool() as Pool & {
     totalCount?: number;
     idleCount?: number;
     waitingCount?: number;
   };
+  const total = p.totalCount ?? 0;
+  const idle = p.idleCount ?? 0;
   return {
-    total: p.totalCount ?? 0,
-    idle: p.idleCount ?? 0,
+    total,
+    idle,
     waiting: p.waitingCount ?? 0,
+    active: total - idle,
   };
 }
 

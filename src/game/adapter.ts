@@ -332,7 +332,7 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
         ...this.currentState,
         phase: 'crashed',
         crashedAt: snapshot.timestamp,
-        crashPoint: snapshot.crashPoint || prevState.currentMultiplier,
+        crashPoint: snapshot.crashPoint ?? (await this.extractExplicitCrashPoint(this.options.page)) ?? prevState.currentMultiplier,
         currentMultiplier: snapshot.crashPoint || prevState.currentMultiplier,
         lastTickAt: snapshot.timestamp,
         source: snapshot.source,
@@ -418,7 +418,7 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
     // WebSocket interception is set up via page.evaluate
     // This injects a script that intercepts WebSocket messages
     try {
-      await (this.options.page as any).evaluateOnNewDocument(() => {
+      await (this.options.page as any).addInitScript(() => {
         // Store original WebSocket
         const OriginalWebSocket = window.WebSocket;
 
@@ -472,6 +472,25 @@ export class GameAdapter extends EventEmitter implements IGameAdapter {
         'Failed to set up WebSocket interception'
       );
     }
+  }
+
+  private async extractExplicitCrashPoint(page: Page): Promise<number | null> {
+    return await page.evaluate((selectors) => {
+      const getText = (sel: string): string | null => {
+        const el = document.querySelector(sel);
+        return el ? el.textContent?.trim() || null : null;
+      };
+
+      const crashText = getText(selectors.crashPoint) || getText(selectors.crashResult);
+      if (!crashText) return null;
+
+      const match = crashText.match(/(?:x\s*)?(\d+\.?\d*)\s*(?:x|X)?/);
+      if (!match) return null;
+
+      const val = parseFloat(match[1]);
+      if (val >= 1.0 && val < 100000) return val;
+      return null;
+    }, DOM_SELECTORS);
   }
 
   private async verifyGameLoaded(): Promise<void> {

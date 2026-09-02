@@ -18,7 +18,7 @@
 import type { AppConfig } from '../config/schema';
 import { getLogger } from '../observability/logger';
 import { EventBus, getEventBus } from '../core/event-bus/bus';
-import { getPool } from '../persistence/client';
+import { getPool, getPoolStats } from '../persistence/client';
 import { BetRepository } from '../persistence/repositories/bet-repo';
 import { RoundRepository } from '../persistence/repositories/round-repo';
 import { SessionRepository } from '../persistence/repositories/session-repo';
@@ -30,7 +30,7 @@ import { DEFAULT_THROTTLE_POLICIES } from '../telegram/types';
 import { PredictionEngine } from '../prediction/prediction-engine';
 import { EntryDecisionService } from '../prediction/entry-decision-service';
 import { prewarmPredictionStack } from '../prediction/prewarm';
-import { setPrewarmResult } from '../observability/readiness';
+import { setPrewarmResult, getReadiness } from '../observability/readiness';
 import { DecisionEngine } from '../decision/decision-engine';
 import { OpportunityRanker } from '../opportunity/ranker';
 import { RiskEngine } from '../betting/risk-engine';
@@ -213,43 +213,56 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   workerFleet.register(new SettlementWorker());
   workerFleet.register(new RiskWorker({
     riskEngine,
-    buildRiskInput: (payload) => ({
-      mode: config.system.mode as 'observe-only' | 'dry-run' | 'live' | 'maintenance',
-      operatorAuthorized: true,
-      sessionAuthenticated: config.system.mode === 'dry-run' || config.system.mode === 'observe-only',
-      gameLoaded: true,
-      roundState: payload?.roundId
-        ? {
-            phase: 'crashed' as const,
-            roundId: String(payload.roundId),
-            currentMultiplier: Number(payload.crashPoint ?? 1),
-            crashPoint: Number(payload.crashPoint ?? 0) || null,
-            startedAt: null,
-            lastTickAt: null,
-            crashedAt: new Date().toISOString(),
-            confidence: 'medium' as const,
-            source: 'dom' as const,
-          }
-        : null,
-      currentBalance: 0,
-      dailyEntriesConfirmed: 0,
-      paused: false,
-      killSwitch: false,
-      browserHealthy: true,
-      gameAdapterHealthy: true,
-      openBetExists: false,
-      cooldownElapsed: true,
-      requiredStake: config.betting.stakePerEntry,
-      balanceBuffer: config.risk.balanceBuffer,
-      maxDailyEntries: config.betting.maxDailyEntries,
-      minConfidenceForEntry: 'medium' as const,
-      consecutiveErrors: 0,
-      maxConsecutiveErrors: config.risk.maxConsecutiveErrorsBeforeStop,
-      cashOutFailures: 0,
-      maxCashOutFailures: config.risk.maxCashOutFailuresBeforeStop,
-      minPredictionProbability: config.risk.minPredictionProbability,
-      minPredictionConfidence: config.risk.minPredictionConfidence,
-    }),
+    buildRiskInput: (payload) => {
+      const supState = sessionSupervisor.getState();
+      const balance = virtualLedger.getBalance();
+      const openBetExists = liveBetExecutor?.isBusy() ?? false;
+      let dailyEntriesConfirmed = 0;
+      try {
+        dailyEntriesConfirmed = runtime.recentTrades.filter((t) => {
+          const openedAt = String(t.openedAt ?? '');
+          const today = new Date().toISOString().slice(0, 10);
+          return openedAt.startsWith(today);
+        }).length;
+      } catch { dailyEntriesConfirmed = 0; }
+      return {
+        mode: config.system.mode as 'observe-only' | 'dry-run' | 'live' | 'maintenance',
+        operatorAuthorized: true,
+        sessionAuthenticated: supState.authenticated,
+        gameLoaded: supState.gameLoaded,
+        roundState: payload?.roundId
+          ? {
+              phase: 'starting' as const,
+              roundId: String(payload.roundId),
+              currentMultiplier: 1,
+              crashPoint: null,
+              startedAt: new Date().toISOString(),
+              lastTickAt: null,
+              crashedAt: null,
+              confidence: 'medium' as const,
+              source: 'dom' as const,
+            }
+          : null,
+        currentBalance: balance,
+        dailyEntriesConfirmed,
+        paused: runtime.halted,
+        killSwitch: false,
+        browserHealthy: supState.phase !== 'browser-failed' && supState.phase !== 'error',
+        gameAdapterHealthy: supState.gameLoaded,
+        openBetExists,
+        cooldownElapsed: true,
+        requiredStake: config.betting.stakePerEntry,
+        balanceBuffer: config.risk.balanceBuffer,
+        maxDailyEntries: config.betting.maxDailyEntries,
+        minConfidenceForEntry: 'medium' as const,
+        consecutiveErrors: supState.consecutiveErrors ?? 0,
+        maxConsecutiveErrors: config.risk.maxConsecutiveErrorsBeforeStop,
+        cashOutFailures: 0,
+        maxCashOutFailures: config.risk.maxCashOutFailuresBeforeStop,
+        minPredictionProbability: config.risk.minPredictionProbability,
+        minPredictionConfidence: config.risk.minPredictionConfidence,
+      };
+    },
   }));
   workerFleet.register(new ValidationWorker());
   workerFleet.register(new RegimeWorker());
@@ -315,10 +328,20 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       getHealthStatus: () => {
         const sup = sessionSupervisor.getState();
         const degraded = sup.phase === 'error' || sup.phase === 'browser-failed' || sup.phase === 'region-blocked';
+        let database: { total: number; idle: number; waiting: number } | { error: string };
+        try {
+          const stats = getPoolStats();
+          database = { total: stats.total, idle: stats.idle, waiting: stats.waiting };
+        } catch (err) {
+          database = { error: err instanceof Error ? err.message : String(err) };
+        }
         return {
           status: degraded ? 'degraded' : 'healthy',
           mode: runtime.currentMode,
           session: runtime.sessionId,
+          database,
+          prediction: getReadiness(),
+          lastRound: runtime.lastRound,
           workers: workerFleet.snapshot(),
           browser: {
             phase: sup.phase,
@@ -356,12 +379,14 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       setSystemMode: async (mode: string) => {
         const valid = ['observe-only', 'dry-run', 'live', 'maintenance'];
         if (!valid.includes(mode)) return false;
+        const previousMode = runtime.currentMode;
         runtime.currentMode = mode as AppConfig['system']['mode'];
         (config.system as unknown as { mode: string }).mode = mode as AppConfig['system']['mode'];
         if (mode === 'live') {
           runtime.halted = false;
           runtime.haltReason = undefined;
         }
+        logger.warn({ previousMode, newMode: mode }, 'Mode changed; restart required for full effect');
         return true;
       },
       pauseSystem: async (reason: string) => {
@@ -740,6 +765,36 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       logger.info({ component: 'Composition' }, 'Worker feed + history buffer wired to RoundCrashed');
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'Worker feed wire skipped');
+    }
+
+    // Feed background workers on RoundStarted as well
+    try {
+      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string; sessionId?: string; startedAt?: string } }) => {
+        const p = ev?.payload;
+        if (!p?.roundId) return;
+        const ctx = {
+          tenantId: null as string | null,
+          correlationId: p.roundId,
+          eventId: `evt-start-${p.roundId}-${Date.now()}`,
+          receivedAt: new Date().toISOString(),
+        };
+        const payload = {
+          type: 'round-started',
+          roundId: p.roundId,
+          sessionId: p.sessionId ?? runtime.sessionId,
+          startedAt: p.startedAt ?? new Date().toISOString(),
+        };
+        for (const name of ['regime-1', 'analytics-1', 'learning-1', 'validation-1', 'settlement-1', 'risk-1']) {
+          const w = workerFleet.get(name);
+          if (!w || !w.isRunning) continue;
+          void w.process(payload, ctx).catch((e: unknown) =>
+            logger.debug({ component: 'Composition', worker: name, error: String(e) }, 'worker process skipped')
+          );
+        }
+      });
+      logger.info({ component: 'Composition' }, 'Worker feed wired to RoundStarted');
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'RoundStarted worker feed wire skipped');
     }
 
     if (telegramGateway && telegramEnabled) {
