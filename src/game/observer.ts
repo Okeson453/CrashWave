@@ -3,8 +3,7 @@
  * Uses shared RoundState from types/game so Orchestrator typing is consistent.
  */
 import { getLogger } from '../observability/logger';
-import type { GameAdapter } from './adapter';
-import type { NormalizedGameEvent } from './types';
+import type { IGameAdapter, NormalizedGameEvent } from './types';
 import type {
   RoundState,
   ObservationSource,
@@ -15,9 +14,10 @@ export type { RoundState } from '../types/game';
 export type RoundPhase = RoundState['phase'];
 
 export interface RoundObserverOptions {
-  adapter: GameAdapter;
+  adapter: IGameAdapter;
   minConfidenceForEntry?: 'low' | 'medium' | 'high';
   maxLatencyMs?: number;
+  staleThresholdMs?: number;
 }
 
 function asSource(s: ObservationSource | string | null | undefined): ObservationSource {
@@ -44,6 +44,7 @@ export class RoundObserver {
   private tickHistory: Array<{ multiplier: number; timestamp: string; latencyMs: number }> = [];
   private roundCount = 0;
   private lastStateChangeAt = Date.now();
+  private lastEventTimestamp: number | null = null;
   private stateListeners: Array<(state: RoundState) => void> = [];
   private roundCompleteListeners: Array<(roundId: string, crashPoint: number) => void> = [];
   private roundStartListeners: Array<(roundId: string) => void> = [];
@@ -167,17 +168,23 @@ export class RoundObserver {
   }
 
   private calculateConfidence(event: NormalizedGameEvent): ObservationConfidence {
-    if (event.confidence === 'high' || event.confidence === 'medium' || event.confidence === 'low') {
-      return event.confidence;
-    }
-    if (event.source === 'websocket') return 'high';
-    if (event.source === 'api') return 'medium';
+    // Derive confidence from the source, not the event's confidence field.
+    // The event's confidence is an upstream hint; the observer makes its
+    // own determination based on source reliability.
+    const src = asSource(event.source);
+    if (src === 'websocket') return 'high';
+    if (src === 'api') return 'medium';
+    if (src === 'dom') return 'medium';
     return 'low';
   }
 
   private updateState(state: RoundState): void {
     this.currentState = state;
     this.lastStateChangeAt = Date.now();
+    if (state.lastTickAt) {
+      const t = Date.parse(state.lastTickAt);
+      if (!isNaN(t)) this.lastEventTimestamp = t;
+    }
     for (const listener of this.stateListeners) {
       try {
         listener(state);
@@ -185,6 +192,12 @@ export class RoundObserver {
         /* */
       }
     }
+  }
+
+  /** Age of the most recent event timestamp (ms since event). */
+  getLastEventAgeMs(): number {
+    if (this.lastEventTimestamp == null) return 0;
+    return Date.now() - this.lastEventTimestamp;
   }
 
   getCurrentState(): RoundState {
@@ -225,5 +238,45 @@ export class RoundObserver {
 
   getLastStateChangeAgeMs(): number {
     return Date.now() - this.lastStateChangeAt;
+  }
+
+  /** Public read-only access to the multiplier tick history. */
+  getTickHistory(): Array<{ multiplier: number; timestamp: string; latencyMs: number }> {
+    return [...this.tickHistory];
+  }
+
+  /** True when a round is in progress but no tick has arrived within
+   *  the configured stale threshold. */
+  isStale(): boolean {
+    if (!this.currentState || this.currentState.phase !== 'running') {
+      return false;
+    }
+    return this.getLastEventAgeMs() > (this.options.staleThresholdMs ?? 2000);
+  }
+
+  /** Confidence assessment for the most recent observation. */
+  getConfidence(): ObservationConfidence {
+    return this.calculateConfidenceForState();
+  }
+
+  /** True when the observer has enough confidence to be used as the
+   *  source of truth for downstream decisions. */
+  isValidForObservation(): boolean {
+    if (!this.isRunning()) return false;
+    if (this.currentState.phase !== 'running') return false;
+    const minConf = this.options.minConfidenceForEntry ?? 'medium';
+    if (minConf === 'high' && this.getConfidence() !== 'high') return false;
+    if (minConf === 'medium' && this.getConfidence() === 'low') return false;
+    return !this.isStale();
+  }
+
+  private calculateConfidenceForState(): ObservationConfidence {
+    // Stale overrides everything
+    if (this.isStale()) return 'low';
+    // Otherwise, derive from the most recent event source
+    if (this.currentState.source === 'websocket') return 'high';
+    if (this.currentState.source === 'api') return 'medium';
+    if (this.currentState.source === 'dom') return 'medium';
+    return 'low';
   }
 }
