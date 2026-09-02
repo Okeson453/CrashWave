@@ -325,10 +325,15 @@ export class ACIEEngine {
       alpha: this.ewmaAlpha,
     });
 
-    // 4) Heavy validation — FLAG ONLY on hot path (never O(n) evaluate here)
+    // 4) Heavy validation — flag the result so callers can observe
+    //    when a heavy-validation cycle was scheduled. The heavy work
+    //    itself runs async via scheduleHeavyEvidence(); the flag is
+    //    set to true synchronously so the hot path observably reports
+    //    when a heavy tick was triggered.
     let heavyValidationRan = false;
     if (this.online.sinceHeavyValidation >= this.heavyEvery) {
       this.pendingHeavyEvidence = true;
+      heavyValidationRan = true;
       this.scheduleHeavyEvidence();
     }
     if (!this.lastEvidence) {
