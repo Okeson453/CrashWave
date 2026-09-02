@@ -99,7 +99,7 @@ export async function handleLoginConversationText(
     return true;
   }
   if (!deps.loginWithCredentials) {
-    await ctx.reply('Live mode login is not wired in this build. /mode live is a no-op until the browser pipeline is enabled.');
+    await ctx.reply('Login handler is not injected. Restart the process and try /login again.');
     return true;
   }
   await ctx.reply('Logging in…');

@@ -48,7 +48,7 @@ import { RecoveryManager } from '../core/recovery-manager';
 import { UnknownStateRecovery } from '../ledger/unknown-state-recovery';
 import { BalanceReconciliation } from '../ledger/balance-reconciliation';
 import { BalanceTracker } from '../ledger/balance-tracker';
-import { LiveLoginService } from '../browser/live-login';
+import { SessionSupervisor } from '../core/session-supervisor';
 
 const logger = getLogger();
 
@@ -209,12 +209,15 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   workerFleet.register(new ValidationWorker());
   workerFleet.register(new RegimeWorker());
 
-  // Live login service — one-shot browser login for the /login Telegram command.
-  // Lazily instantiates Chromium only when /login is invoked; closes the context
-  // when done so the runtime does not hold a browser between commands.
-  const liveLogin = new LiveLoginService({
-    profileDirectory: config.browser.profileDirectory,
-    headless: config.browser.headless,
+  // SessionSupervisor owns persistent browser + BC.Game auth + observation.
+  // /login keeps the browser alive, persists encrypted session state, navigates
+  // to Crash, and starts GameAdapter/RoundObserver so RoundStarted/RoundCrashed
+  // flow to the EventBus (and dry-run bridge).
+  const sessionSupervisor = new SessionSupervisor({
+    config,
+    eventBus,
+    dryRunController,
+    sessionId: runtime.sessionId,
   });
 
   // Telegram gateway
@@ -241,22 +244,43 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     // Inject router dependencies. These are read by the command handlers
     // (status, login, analytics, control, config).
     telegramGateway.setRouterDependencies({
-      getOrchestratorState: () => ({
-        sessionId: runtime.sessionId,
-        uptimeSeconds: (Date.now() - runtime.startedAt) / 1000,
-        mode: runtime.currentMode,
-        lastRound: runtime.lastRound,
-        recentTrades: runtime.recentTrades,
-        halted: runtime.halted,
-        haltReason: runtime.haltReason,
-      }),
+      getOrchestratorState: () => {
+        const sup = sessionSupervisor.getState();
+        return {
+          sessionId: runtime.sessionId,
+          uptimeSeconds: (Date.now() - runtime.startedAt) / 1000,
+          mode: runtime.currentMode,
+          lastRound: runtime.lastRound,
+          recentTrades: runtime.recentTrades,
+          halted: runtime.halted,
+          haltReason: runtime.haltReason,
+          phase: sup.phase,
+          authenticated: sup.authenticated,
+          observing: sup.observing,
+          gameLoaded: sup.gameLoaded,
+          browserLaunched: sup.browserLaunched,
+          loginStatus: sup.loginStatus,
+        };
+      },
       getLedgerSummary: () => virtualLedger.snapshot() as unknown as Record<string, unknown>,
-      getHealthStatus: () => ({
-        status: 'healthy',
-        mode: runtime.currentMode,
-        session: runtime.sessionId,
-        workers: workerFleet.snapshot(),
-      }),
+      getHealthStatus: () => {
+        const sup = sessionSupervisor.getState();
+        const degraded = sup.phase === 'error' || sup.phase === 'browser-failed' || sup.phase === 'region-blocked';
+        return {
+          status: degraded ? 'degraded' : 'healthy',
+          mode: runtime.currentMode,
+          session: runtime.sessionId,
+          workers: workerFleet.snapshot(),
+          browser: {
+            phase: sup.phase,
+            launched: sup.browserLaunched,
+            authenticated: sup.authenticated,
+            observing: sup.observing,
+            gameLoaded: sup.gameLoaded,
+            loginStatus: sup.loginStatus,
+          },
+        };
+      },
       getWindowedAnalytics: (_amount: number, _unit: string) => ({
         signals: runtime.recentTrades.length,
         signalsAccepted: runtime.recentTrades.filter((t) => t.status !== 'OPEN').length,
@@ -306,14 +330,11 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       unsheathSystem: async () => true,
       getSheathState: () => ({ state: 'armed', bettingSuspended: false, triggers: [] }),
       loginWithCredentials: async (email: string, password: string) => {
-        // LiveLoginService runs preflight, launches headless Chromium,
-        // submits credentials via submitBcGameLogin, captures and encrypts
-        // the resulting cookies/storage to <profileDir>/session-state.enc,
-        // and tears the browser back down. Password is held in a local
-        // variable only and goes out of scope on return — never logged,
-        // never written to disk, never sent to DB/Redis.
+        // SessionSupervisor: preflight → launch/reuse browser → login pipeline →
+        // encrypt session → navigate to Crash → start observation. Browser stays
+        // alive. Password is scoped to the call and never logged/persisted.
         try {
-          const outcome = await liveLogin.login(email, password);
+          const outcome = await sessionSupervisor.loginWithCredentials(email, password);
           logger.info(
             {
               component: 'Composition',
@@ -322,6 +343,9 @@ export function composeApplication(config: AppConfig): CompositionHandles {
               authenticated: outcome.authenticated,
               pageState: outcome.pageState,
               regionBlocked: outcome.regionBlocked,
+              observing: outcome.observing,
+              gameLoaded: outcome.gameLoaded,
+              phase: sessionSupervisor.getPhase(),
             },
             '/login handler returned'
           );
@@ -417,7 +441,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         dryRunController,
         riskStateProvider: {
           buildFresh: async () => ({
-            sessionAuthenticated: true,
+            sessionAuthenticated: sessionSupervisor.isAuthenticated() || config.system.mode === 'dry-run',
             currentBalance: virtualLedger.getBalance(),
             consecutiveErrors: 0,
             consecutiveCashOutFailures: 0,
@@ -443,6 +467,28 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'DryRunBridge wire skipped');
     }
+
+    // Start SessionSupervisor: launches browser, restores encrypted session if
+    // present, navigates to Crash (dry-run/observe-only), starts observation.
+    // Live mode without a restored session stays in auth-required until /login.
+    try {
+      await sessionSupervisor.start();
+      logger.info(
+        {
+          component: 'Composition',
+          phase: sessionSupervisor.getPhase(),
+          authenticated: sessionSupervisor.isAuthenticated(),
+          observing: sessionSupervisor.isObserving(),
+        },
+        'SessionSupervisor started'
+      );
+    } catch (err) {
+      logger.warn(
+        { component: 'Composition', error: String(err) },
+        'SessionSupervisor.start failed (Telegram /login still available)'
+      );
+    }
+
     await workerFleet.startAll();
     if (telegramGateway && telegramEnabled) {
       try {
@@ -472,6 +518,11 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       dailyReportTimer = null;
     }
     try { dryRunController.stop(); } catch { /* ignore */ }
+    try {
+      await sessionSupervisor.stop();
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'SessionSupervisor stop error');
+    }
     if (telegramGateway) {
       try {
         await telegramGateway.stop();
