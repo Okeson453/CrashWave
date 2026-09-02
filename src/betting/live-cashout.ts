@@ -27,7 +27,8 @@ export class LiveCashOutExecutor {
   constructor(
     private page: Page | null,
     private readonly cashOutSelector = DOM_SELECTORS.cashOutButton,
-    private readonly timeoutMs = 8000
+    private readonly timeoutMs = 8000,
+    private readonly systemMode?: string
   ) {}
 
   bindPage(page: Page | null): void {
@@ -44,7 +45,11 @@ export class LiveCashOutExecutor {
 
   async cashOut(betId: string, roundId: string, dryRun = false): Promise<LiveCashOutResult> {
     const start = Date.now();
-    const blocked = realExecutionBlockReason(dryRun, 'LiveCashOutExecutor');
+    const blocked = realExecutionBlockReason(
+      dryRun,
+      String(this.systemMode ?? process.env.APP_SYSTEM__MODE ?? '').toLowerCase(),
+      'LiveCashOutExecutor'
+    );
     if (blocked) {
       return {
         success: false,

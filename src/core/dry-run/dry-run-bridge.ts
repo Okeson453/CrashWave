@@ -62,11 +62,7 @@ export async function onRoundStartedForDryRun(
     deps.dryRunController.recordPrediction();
     const riskInput = await deps.riskStateProvider.buildFresh();
 
-    // Per spec §3.6: drop the bizarre 1.3 | 2.0 | 5.0 | 10.0 ternary.
-    // Just use the configured target as a plain number; cast through
-    // unknown to satisfy the ThresholdTarget literal-type check in
-    // EntryDecisionService.
-    const target = Number(deps.config.betting?.cashOutTarget ?? 1.3) as unknown as 1.3;
+    const target = Number(deps.config.betting?.cashOutTarget ?? 1.3);
 
     const result = await deps.entryDecisionService.evaluateEntry({
       roundId,

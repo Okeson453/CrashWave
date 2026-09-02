@@ -51,6 +51,7 @@ import { UnknownStateRecovery } from '../ledger/unknown-state-recovery';
 import { BalanceReconciliation } from '../ledger/balance-reconciliation';
 import { BalanceTracker } from '../ledger/balance-tracker';
 import { SessionSupervisor } from '../core/session-supervisor';
+import { runNetworkPreflight } from '../browser/preflight';
 import { LiveBetExecutor } from '../betting/live-executor';
 import { LiveCashOutExecutor } from '../betting/live-cashout';
 import { resolvePlacementPath } from '../betting/bet-executor-factory';
@@ -279,8 +280,8 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   });
 
   // Live placement path (page bound after supervisor has a browser page)
-  const liveBetExecutor = new LiveBetExecutor(null, betRepo);
-  const liveCashOutExecutor = new LiveCashOutExecutor(null);
+  const liveBetExecutor = new LiveBetExecutor(null, betRepo, undefined, { systemMode: runtime.currentMode });
+  const liveCashOutExecutor = new LiveCashOutExecutor(null, undefined, undefined, runtime.currentMode);
 
   // Telegram gateway
   const telegramEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN);
@@ -523,6 +524,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   let started = false;
   let dailyReportTimer: NodeJS.Timeout | null = null;
   const DAILY_REPORT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+  const unsubscribers: Array<() => void> = [];
 
   async function start(): Promise<void> {
     if (started) return;
@@ -571,18 +573,20 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         sessionId: runtime.sessionId,
       };
       // Subscribe to the orchestrator events via the shared event bus.
-      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string } }) => {
+      const unsubDryRunRoundStarted = eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string } }) => {
         const roundId = String(ev?.payload?.roundId ?? '');
         if (roundId) {
           void bridge.onRoundStartedForDryRun(bridgeDeps, roundId);
         }
       });
-      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number } }) => {
+      unsubscribers.push(unsubDryRunRoundStarted);
+      const unsubDryRunRoundCrashed = eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number } }) => {
         const p = ev?.payload;
         if (p?.roundId) {
           bridge.onRoundCrashedForDryRun(bridgeDeps, p);
         }
       });
+      unsubscribers.push(unsubDryRunRoundCrashed);
       logger.info({ component: 'Composition' }, 'DryRunBridge wired to RoundStarted/RoundCrashed');
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'DryRunBridge wire skipped');
@@ -608,21 +612,34 @@ export function composeApplication(config: AppConfig): CompositionHandles {
           }
         },
       };
-      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string } }) => {
+      const unsubLiveRoundStarted =       eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string } }) => {
         const roundId = String(ev?.payload?.roundId ?? '');
         if (!roundId) return;
-        // Bind page each round in case browser recovered
         try {
           const page = sessionSupervisor.getBrowserManager()?.getPage() ?? null;
           liveBetExecutor.bindPage(page);
           liveCashOutExecutor.bindPage(page);
         } catch { /* ignore */ }
-        void liveBridge.onRoundStartedForLive(liveDeps, roundId);
+        void liveBridge.onRoundStartedForLive(liveDeps, roundId).then((result) => {
+          if (result?.placed) {
+            runtime.recentTrades.unshift({
+              virtualTradeId: result.betId,
+              roundId,
+              stake: result.stake,
+              target: result.target,
+              status: 'OPEN',
+              openedAt: new Date().toISOString(),
+            });
+            if (runtime.recentTrades.length > 50) runtime.recentTrades.length = 50;
+          }
+        }).catch(() => {});
       });
-      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number } }) => {
+      unsubscribers.push(unsubLiveRoundStarted);
+      const unsubLiveRoundCrashed = eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number } }) => {
         const p = ev?.payload;
         if (p?.roundId) void liveBridge.onRoundCrashedForLive(liveDeps, p);
       });
+      unsubscribers.push(unsubLiveRoundCrashed);
       const path = resolvePlacementPath({
         mode: config.system.mode as 'live' | 'dry-run' | 'observe-only' | 'maintenance',
         liveBound: true,
@@ -634,7 +651,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
 
     // Persist rounds when observation emits (best-effort)
     try {
-      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string; sessionId?: string; startedAt?: string } }) => {
+      const unsubPersistenceRoundStarted = eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string; sessionId?: string; startedAt?: string } }) => {
         const p = ev?.payload;
         if (!p?.roundId) return;
         void roundRepo
@@ -649,12 +666,13 @@ export function composeApplication(config: AppConfig): CompositionHandles {
             logger.debug({ component: 'Composition', error: String(e) }, 'round create skipped')
           );
       });
-      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number; crashedAt?: string } }) => {
+      unsubscribers.push(unsubPersistenceRoundStarted);
+      const unsubPersistenceRoundCrashed = eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number; crashedAt?: string } }) => {
         const p = ev?.payload;
         if (!p?.roundId || p.crashPoint == null) return;
         void (async () => {
           try {
-            const existing = await roundRepo.findByExternalId?.(p.roundId!);
+            const existing = await roundRepo.findByExternalId(p.roundId!);
             if (existing?.id) {
               await roundRepo.update(existing.id, {
                 crashedAt: p.crashedAt ?? new Date().toISOString(),
@@ -667,13 +685,54 @@ export function composeApplication(config: AppConfig): CompositionHandles {
           }
         })();
       });
+      unsubscribers.push(unsubPersistenceRoundCrashed);
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'Round persistence wire skipped');
+    }
+
+    // Feed background workers on RoundStarted (wired before SessionSupervisor.start
+    // so that the first RoundStarted event after launch is not missed).
+    try {
+      const unsubWorkerRoundStarted = eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string; sessionId?: string; startedAt?: string } }) => {
+        const p = ev?.payload;
+        if (!p?.roundId) return;
+        const ctx = {
+          tenantId: null as string | null,
+          correlationId: p.roundId,
+          eventId: `evt-start-${p.roundId}-${Date.now()}`,
+          receivedAt: new Date().toISOString(),
+        };
+        const payload = {
+          type: 'round-started',
+          roundId: p.roundId,
+          sessionId: p.sessionId ?? runtime.sessionId,
+          startedAt: p.startedAt ?? new Date().toISOString(),
+        };
+        for (const name of ['regime-1', 'analytics-1', 'learning-1', 'validation-1', 'settlement-1', 'risk-1']) {
+          const w = workerFleet.get(name);
+          if (!w || !w.isRunning) continue;
+          void w.process(payload, ctx).catch((e: unknown) =>
+            logger.debug({ component: 'Composition', worker: name, error: String(e) }, 'worker process skipped')
+          );
+        }
+      });
+      unsubscribers.push(unsubWorkerRoundStarted);
+      logger.info({ component: 'Composition' }, 'Worker feed wired to RoundStarted');
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'RoundStarted worker feed wire skipped');
     }
 
     // Start SessionSupervisor: launches browser, restores encrypted session if
     // present, navigates to Crash (dry-run/observe-only), starts observation.
     // Live mode without a restored session stays in auth-required until /login.
+    try {
+      const preflight = await runNetworkPreflight((config as { proxy?: { server?: string } }).proxy?.server ?? '');
+      if (!preflight.ok) {
+        logger.warn({ component: 'Composition', checks: preflight.checks }, 'Network preflight failed');
+      }
+    } catch (err) {
+      logger.debug({ component: 'Composition', error: String(err) }, 'Network preflight skipped');
+    }
     try {
       await sessionSupervisor.start();
       logger.info(
@@ -730,7 +789,7 @@ export function composeApplication(config: AppConfig): CompositionHandles {
         eventId: `evt-${roundId}-${Date.now()}`,
         receivedAt: new Date().toISOString(),
       });
-      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number; crashedAt?: string } }) => {
+      const unsubWorkerRoundCrashed = eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number; crashedAt?: string } }) => {
         const p = ev?.payload;
         if (!p?.roundId || p.crashPoint == null || !Number.isFinite(Number(p.crashPoint))) return;
         const crashPoint = Number(p.crashPoint);
@@ -750,9 +809,6 @@ export function composeApplication(config: AppConfig): CompositionHandles {
           dataQuality: 'medium',
           createdAt: new Date().toISOString(),
         });
-        try {
-          entryDecisionService.observeCrash(roundId, crashPoint);
-        } catch { /* ignore */ }
 
         for (const name of ['regime-1', 'analytics-1', 'learning-1', 'validation-1', 'settlement-1', 'risk-1']) {
           const w = workerFleet.get(name);
@@ -762,39 +818,10 @@ export function composeApplication(config: AppConfig): CompositionHandles {
           );
         }
       });
+      unsubscribers.push(unsubWorkerRoundCrashed);
       logger.info({ component: 'Composition' }, 'Worker feed + history buffer wired to RoundCrashed');
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'Worker feed wire skipped');
-    }
-
-    // Feed background workers on RoundStarted as well
-    try {
-      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string; sessionId?: string; startedAt?: string } }) => {
-        const p = ev?.payload;
-        if (!p?.roundId) return;
-        const ctx = {
-          tenantId: null as string | null,
-          correlationId: p.roundId,
-          eventId: `evt-start-${p.roundId}-${Date.now()}`,
-          receivedAt: new Date().toISOString(),
-        };
-        const payload = {
-          type: 'round-started',
-          roundId: p.roundId,
-          sessionId: p.sessionId ?? runtime.sessionId,
-          startedAt: p.startedAt ?? new Date().toISOString(),
-        };
-        for (const name of ['regime-1', 'analytics-1', 'learning-1', 'validation-1', 'settlement-1', 'risk-1']) {
-          const w = workerFleet.get(name);
-          if (!w || !w.isRunning) continue;
-          void w.process(payload, ctx).catch((e: unknown) =>
-            logger.debug({ component: 'Composition', worker: name, error: String(e) }, 'worker process skipped')
-          );
-        }
-      });
-      logger.info({ component: 'Composition' }, 'Worker feed wired to RoundStarted');
-    } catch (err) {
-      logger.warn({ component: 'Composition', error: String(err) }, 'RoundStarted worker feed wire skipped');
     }
 
     if (telegramGateway && telegramEnabled) {
@@ -820,6 +847,10 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     if (!started) return;
     started = false;
     logger.info({ component: 'Composition' }, 'Stopping personal-use composition');
+    for (const unsub of unsubscribers) {
+      try { unsub(); } catch { /* ignore */ }
+    }
+    unsubscribers.length = 0;
     if (dailyReportTimer) {
       clearInterval(dailyReportTimer);
       dailyReportTimer = null;

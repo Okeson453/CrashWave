@@ -3,8 +3,8 @@
  * Analytics = what happened; Prediction = model estimate; Risk = allowed?; Execution = act.
  */
 
-export type ThresholdTarget = 1.3 | 2.0 | 5.0 | 10.0;
-export const SUPPORTED_TARGETS: readonly ThresholdTarget[] = [1.3, 2.0, 5.0, 10.0] as const;
+export type ThresholdTarget = number;
+export const SUPPORTED_TARGETS: readonly number[] = [1.3, 2.0, 5.0, 10.0] as const;
 export type FeatureVersion = string;
 export type TargetVersion = string;
 

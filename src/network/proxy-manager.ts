@@ -76,8 +76,10 @@ export class ProxyPool {
   private endpoints: ResolvedProxy[] = [];
   private cursor = 0;
 
-  loadFromConfig(_endpoints: string[] | undefined): void {
-    // No-op in personal use
+  loadFromConfig(endpoints: string[] | undefined): void {
+    this.endpoints = (endpoints ?? [])
+      .map((raw) => parseProxyEndpoint(raw))
+      .filter((p): p is ResolvedProxy => p !== null);
   }
 
   size(): number {

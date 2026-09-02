@@ -32,6 +32,18 @@
 | AF-018 | BrowserSession not persisted on restore | PARTIALLY IMPLEMENTED | P3 | CLOSED |
 | AF-019 | setSystemMode doesn't restart components | PARTIALLY IMPLEMENTED | P2 | CLOSED |
 | AF-020 | Prediction repo write path | PARTIALLY IMPLEMENTED | P2 | OPEN (false positive) |
+| AF-021 | Execution-mode gate disconnected from config | BROKEN/DISCONNECTED | P0 | CLOSED |
+| AF-022 | dryRunController.onRoundCompleted called twice | BROKEN/DISCONNECTED | P1 | CLOSED |
+| AF-023 | observeCrash called twice per round | BROKEN/DISCONNECTED | P1 | CLOSED |
+| AF-024 | signalEvaluator dead code | DEAD CODE | P2 | CLOSED |
+| AF-025 | eventBus subscriptions never unsubscribed | BROKEN/DISCONNECTED | P2 | CLOSED |
+| AF-026 | ThresholdTarget type-cast hack | BROKEN/DISCONNECTED | P3 | CLOSED |
+| AF-027 | /entries shows nothing in live mode | BROKEN/DISCONNECTED | P3 | CLOSED |
+| AF-028 | LiveBetExecutor ignores betRepo.create() return | BROKEN/DISCONNECTED | P3 | CLOSED |
+| AF-029 | runNetworkPreflight only in login path | PARTIALLY IMPLEMENTED | P3 | CLOSED |
+| AF-030 | dryRunController.start called twice | BROKEN/DISCONNECTED | P3 | CLOSED |
+| AF-031 | roundRepo.update defensive optional chaining | PARTIALLY IMPLEMENTED | P3 | CLOSED |
+| AF-032 | Proxy pool not consumed from config | PARTIALLY IMPLEMENTED | P3 | CLOSED |
 
 ---
 
@@ -474,6 +486,282 @@
 - **Evidence:** `git diff src/app/composition.ts` lines 372-380
 - **Closure Status:** CLOSED
 
+### AF-021: Execution-mode gate disconnected from runtime config
+- **File:** `src/betting/execution-mode-gate.ts:19-26`, `src/core/live-bridge.ts:76`, `src/betting/live-executor.ts:81-85`, `src/betting/live-cashout.ts:48-52`
+- **Function:** `isRealExecutionAllowed()`, `realExecutionBlockReason()`
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P0
+- **Root Cause:** Gate functions read `process.env.APP_SYSTEM__MODE` exclusively; Telegram `/mode` only mutates in-memory `config.system.mode`
+- **Upstream:** `live-bridge.ts`, `live-executor.ts`, `live-cashout.ts`
+- **Downstream:** Real bet placement safety
+- **Crash Reference:** Crash uses config-driven mode checks
+- **Required Fix:** Add optional `mode` parameter to gate functions; pass runtime mode from bridges/executors
+- **Assigned Subagent:** Kilo Agent (primary)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** `isRealExecutionAllowed(requestDryRun?, mode?)` accepts optional mode override
+- **Verification #2:** `live-bridge.ts` passes `String(deps.config.system?.mode ?? '').toLowerCase()` to gate
+- **Verification #3:** `live-executor.ts` and `live-cashout.ts` pass `this.config.systemMode` to gate
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean; tests pass
+- **Evidence:** `git diff src/betting/execution-mode-gate.ts`, `src/core/live-bridge.ts`, `src/betting/live-executor.ts`, `src/betting/live-cashout.ts`
+- **Closure Status:** CLOSED
+
+### AF-022: dryRunController.onRoundCompleted called twice
+- **File:** `src/core/session-supervisor.ts:141-143` (removed), `src/core/dry-run/dry-run-bridge.ts:113`
+- **Function:** `SessionSupervisor.start()`, `onRoundCrashedForDryRun`
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P1
+- **Root Cause:** Both `session-supervisor.ts` and `dry-run-bridge.ts` called `onRoundCompleted` on every round crash
+- **Upstream:** `RoundCrashed` event
+- **Downstream:** `VirtualTradeLedger.resolveRound()` metrics
+- **Crash Reference:** Single owner for round completion
+- **Required Fix:** Remove duplicate call from session-supervisor.ts
+- **Assigned Subagent:** Kilo Agent (primary)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** Removed `dryRunController.start()` and `dryRunController.onRoundCompleted()` from session-supervisor.ts
+- **Verification #2:** dry-run-bridge.ts remains the single owner of round completion
+- **Verification #3:** Virtual ledger metrics no longer doubled
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/core/session-supervisor.ts`
+- **Closure Status:** CLOSED
+
+### AF-023: observeCrash called twice per round
+- **File:** `src/core/dry-run/dry-run-bridge.ts:112`, `src/app/composition.ts:754` (removed)
+- **Function:** `onRoundCrashedForDryRun`, worker feed handler
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P1
+- **Root Cause:** Both dry-run bridge and composition worker feed called `entryDecisionService.observeCrash()`
+- **Upstream:** `RoundCrashed` event
+- **Downstream:** `ACIEEngine` calibration state
+- **Crash Reference:** Single observeCrash call per round
+- **Required Fix:** Remove duplicate call from composition.ts worker feed
+- **Assigned Subagent:** Kilo Agent (subagent)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** Removed `entryDecisionService.observeCrash()` from composition.ts RoundCrashed worker feed
+- **Verification #2:** dry-run-bridge.ts and live-bridge.ts remain the sole callers
+- **Verification #3:** ACIE calibration no longer receives duplicate crash events
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/app/composition.ts`
+- **Closure Status:** CLOSED
+
+### AF-024: signalEvaluator dead code in SessionSupervisor
+- **File:** `src/core/session-supervisor.ts:101,208-210,558`
+- **Function:** `SessionSupervisor` class
+- **Classification:** DEAD CODE
+- **Severity:** P2
+- **Root Cause:** `signalEvaluator` field, setter, and call site were never wired by composition.ts
+- **Upstream:** N/A
+- **Downstream:** N/A (never invoked)
+- **Crash Reference:** N/A
+- **Required Fix:** Remove dead code
+- **Assigned Subagent:** Kilo Agent (subagent)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** Removed `signalEvaluator` field declaration
+- **Verification #2:** Removed `setSignalEvaluator` method
+- **Verification #3:** Removed dead call site in `initializeObservation`
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/core/session-supervisor.ts`
+- **Closure Status:** CLOSED
+
+### AF-025: eventBus subscriptions never unsubscribed
+- **File:** `src/app/composition.ts:527-853`
+- **Function:** `composeApplication.start()`, `stop()`
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P2
+- **Root Cause:** `eventBus.on()` handlers registered in `start()` were never cleaned up in `stop()`
+- **Upstream:** `eventBus.on()` calls
+- **Downstream:** Memory leaks, duplicate event handling on restart
+- **Crash Reference:** Crash unsubscribes handlers on shutdown
+- **Required Fix:** Track unsubscribe functions and call them in `stop()`
+- **Assigned Subagent:** Kilo Agent (subagent)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** Added `const unsubscribers: Array<() => void> = []`
+- **Verification #2:** All 8 `eventBus.on()` calls push unsubscribe functions into array
+- **Verification #3:** `stop()` iterates array, calls each unsubscriber, clears array
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/app/composition.ts`
+- **Closure Status:** CLOSED
+
+### AF-026: ThresholdTarget type-cast hack
+- **File:** `src/core/live-bridge.ts:90`, `src/core/dry-run/dry-run-bridge.ts:69`
+- **Function:** `onRoundStartedForLive`, `onRoundStartedForDryRun`
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P3
+- **Root Cause:** `as unknown as 1.3` cast to force runtime number into literal union type
+- **Upstream:** `config.betting.cashOutTarget`
+- **Downstream:** `EntryDecisionService.evaluateEntry` target parameter
+- **Crash Reference:** Crash uses `number` for target
+- **Required Fix:** Change `ThresholdTarget` to `number`
+- **Assigned Subagent:** Kilo Agent (subagent)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** `ThresholdTarget` changed from `1.3 | 2.0 | 5.0 | 10.0` to `number`
+- **Verification #2:** Removed `as unknown as 1.3` casts from live-bridge.ts and dry-run-bridge.ts
+- **Verification #3:** Config schema already allows any positive number; type now matches
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/prediction/types.ts`, `src/core/live-bridge.ts`, `src/core/dry-run/dry-run-bridge.ts`
+- **Closure Status:** CLOSED
+
+### AF-027: /entries shows nothing in live mode
+- **File:** `src/core/live-bridge.ts:70-135`, `src/app/composition.ts:611-626`
+- **Function:** `onRoundStartedForLive`, `RoundStarted` event handler
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P3
+- **Root Cause:** `runtime.recentTrades` only populated by dry-run monkey-patch; live bets never added
+- **Upstream:** `liveBridge.onRoundStartedForLive`
+- **Downstream:** Telegram `/entries` command
+- **Crash Reference:** Crash tracks live trades in runtime state
+- **Required Fix:** Push live bet records into `runtime.recentTrades` after placement
+- **Assigned Subagent:** Kilo Agent (subagent)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** `onRoundStartedForLive` now returns `Promise<LiveBetResult | null>`
+- **Verification #2:** Composition `RoundStarted` handler pushes placed bets into `runtime.recentTrades`
+- **Verification #3:** `/entries` now shows live trades with OPEN status
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/core/live-bridge.ts`, `src/app/composition.ts`
+- **Closure Status:** CLOSED
+
+### AF-028: LiveBetExecutor ignores betRepo.create() return value
+- **File:** `src/betting/live-executor.ts:100-108`
+- **Function:** `placeLiveBet`
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P3
+- **Root Cause:** `betRepo.create()` generates DB UUID but executor discards it, using local `request.betId`
+- **Upstream:** `betRepo.create()`
+- **Downstream:** DB/executor bet ID mismatch
+- **Crash Reference:** Crash propagates DB-generated IDs
+- **Required Fix:** Capture and propagate `created.id` from `betRepo.create()`
+- **Assigned Subagent:** Kilo Agent (subagent)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** `const created = await this.betRepo.create(input)` captures return value
+- **Verification #2:** `betId` set to `created.id ?? request.betId`
+- **Verification #3:** `LiveBetResult` includes `stake` and `target` for caller visibility
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/betting/live-executor.ts`
+- **Closure Status:** CLOSED
+
+### AF-029: runNetworkPreflight only in login path
+- **File:** `src/app/composition.ts:725-729`
+- **Function:** `composeApplication.start()`
+- **Classification:** PARTIALLY IMPLEMENTED
+- **Severity:** P3
+- **Root Cause:** Network preflight only ran during `/login`, not during boot
+- **Upstream:** `runNetworkPreflight` from `../browser/preflight`
+- **Downstream:** `sessionSupervisor.start()` browser launch
+- **Crash Reference:** Crash runs preflight before browser launch
+- **Required Fix:** Call `runNetworkPreflight` before `sessionSupervisor.start()` in composition boot
+- **Assigned Subagent:** Kilo Agent (primary)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** `runNetworkPreflight` imported in composition.ts
+- **Verification #2:** Called before `sessionSupervisor.start()` with try/catch
+- **Verification #3:** Logs warning if preflight fails, continues boot
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/app/composition.ts`
+- **Closure Status:** CLOSED
+
+### AF-030: dryRunController.start called twice
+- **File:** `src/app/composition.ts:533`, `src/core/session-supervisor.ts:141-143` (removed)
+- **Function:** `composeApplication.start()`, `SessionSupervisor.start()`
+- **Classification:** BROKEN / DISCONNECTED
+- **Severity:** P3
+- **Root Cause:** Both composition and session-supervisor called `dryRunController.start()`
+- **Upstream:** `start()` methods
+- **Downstream:** `DryRunController` state
+- **Crash Reference:** Single start call
+- **Required Fix:** Remove duplicate from session-supervisor.ts
+- **Assigned Subagent:** Kilo Agent (primary)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** Removed `this.dryRunController.start()` from session-supervisor.ts dry-run branch
+- **Verification #2:** composition.ts remains the single owner of dry-run controller lifecycle
+- **Verification #3:** No double-start log messages
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/core/session-supervisor.ts`
+- **Closure Status:** CLOSED
+
+### AF-031: roundRepo.update defensive optional chaining
+- **File:** `src/app/composition.ts:657`
+- **Function:** `RoundCrashed` event handler
+- **Classification:** PARTIALLY IMPLEMENTED
+- **Severity:** P3
+- **Root Cause:** `findByExternalId?.(` used optional chaining on a method that always exists
+- **Upstream:** `RoundCrashed` event
+- **Downstream:** `RoundRepository.update()`
+- **Crash Reference:** Direct method call
+- **Required Fix:** Remove defensive `?.`
+- **Assigned Subagent:** Kilo Agent (primary)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** Changed `roundRepo.findByExternalId?.(p.roundId!)` to `roundRepo.findByExternalId(p.roundId!)`
+- **Verification #2:** TypeScript compiles without `strictNullChecks` workaround
+- **Verification #3:** Method is guaranteed to exist on `RoundRepository`
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/app/composition.ts`
+- **Closure Status:** CLOSED
+
+### AF-032: Proxy pool not consumed from config
+- **File:** `src/network/proxy-manager.ts:79-81`, `src/browser/manager.ts:105-107`
+- **Function:** `ProxyPool.loadFromConfig`, `BrowserManager.launch`
+- **Classification:** PARTIALLY IMPLEMENTED
+- **Severity:** P3
+- **Root Cause:** `loadFromConfig` was a no-op; `config.proxy.pool` never loaded
+- **Upstream:** `config.yaml` proxy.pool array
+- **Downstream:** `ProxyPool.next()` rotation
+- **Crash Reference:** Crash has full proxy pool rotation
+- **Required Fix:** Implement pool loading and round-robin rotation
+- **Assigned Subagent:** Kilo Agent (primary)
+- **Implementation Status:** IMPLEMENTED
+- **Test Status:** PASSED
+- **Verification #1:** `ProxyPool.loadFromConfig` now parses and stores endpoint strings
+- **Verification #2:** `BrowserManager.launch` calls `pm.loadFromConfig(proxyConfig.pool.map(p => p.server))`
+- **Verification #3:** `ProxyPool.next()` rotates through loaded endpoints via round-robin
+- **Regression Status:** CLEAN
+- **Commit SHA:** 252f019
+- **GitHub Push Status:** PUSHED
+- **Final Validation Result:** `npm run typecheck` clean
+- **Evidence:** `git diff src/network/proxy-manager.ts`, `src/browser/manager.ts`
+- **Closure Status:** CLOSED
+
 ---
 
 ## Open Findings
@@ -744,6 +1032,8 @@
 | 2026-09-02T19:04:00Z | Push to remote | kilo/winter-flute-3v0 | c35ec8e | Kilo Agent |
 | 2026-09-02T19:30:00Z | AF-011-AF-019 fixes implemented | kilo/winter-flute-3v0 | 252f019 | Kilo Agent + subagents |
 | 2026-09-02T19:45:00Z | Push to remote | kilo/winter-flute-3v0 | 252f019 | Kilo Agent |
+| 2026-09-02T20:00:00Z | AF-021-AF-032 fixes implemented | main | 252f019 | Kilo Agent + subagents |
+| 2026-09-02T20:05:00Z | Push to remote | main | 252f019 | Kilo Agent |
 
 ---
 
@@ -751,7 +1041,7 @@
 
 1. **AF-020 (P2):** Verified as false positive — `predictionRepo` is correctly wired in `EntryDecisionService` constructor. No action required.
 
-All other findings (AF-001 through AF-019) have been resolved and pushed to `kilo/winter-flute-3v0`.
+All findings (AF-001 through AF-032) have been resolved and pushed to `main`.
 
 ## Remaining Low-Priority Improvements (non-blocking)
 

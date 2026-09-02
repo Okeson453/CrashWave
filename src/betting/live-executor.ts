@@ -23,9 +23,12 @@ export interface LiveBetResult {
   error: string | null;
   retryCount: number;
   latencyMs: number;
+  stake: number;
+  target: number;
 }
 
 export interface LiveExecutorConfig {
+  systemMode?: string;
   betAmountSelector: string;
   placeBetButtonSelector: string;
   activeBetIndicatorSelector: string;
@@ -75,7 +78,11 @@ export class LiveBetExecutor {
     if (this.stopped) {
       return this.fail(request, 'Executor is stopped', 0, start);
     }
-    const blocked = realExecutionBlockReason(request.dryRun, 'LiveBetExecutor');
+    const blocked = realExecutionBlockReason(
+      request.dryRun,
+      String(this.config.systemMode ?? process.env.APP_SYSTEM__MODE ?? '').toLowerCase(),
+      'LiveBetExecutor'
+    );
     if (blocked) {
       this.logger.warn({ reason: blocked, roundId: request.roundId }, 'Real execution blocked');
       return this.fail(request, blocked, 0, start);
@@ -97,8 +104,9 @@ export class LiveBetExecutor {
       }
 
       const dailyKey = new Date().toISOString().slice(0, 10);
+      let betId = request.betId;
       try {
-        await this.betRepo.create({
+        const created = await this.betRepo.create({
           sessionId: request.sessionId,
           roundId: request.roundId,
           dailyKey,
@@ -106,6 +114,7 @@ export class LiveBetExecutor {
           cashOutTarget: request.target,
           state: 'PENDING',
         });
+        betId = created.id ?? request.betId;
       } catch (err) {
         this.logger.warn({ error: String(err) }, 'Bet repo create failed (continuing placement)');
       }
@@ -144,8 +153,10 @@ export class LiveBetExecutor {
             );
             return {
               placed: true,
-              betId: request.betId,
+              betId,
               roundId: request.roundId,
+              stake: request.stake,
+              target: request.target,
               state: 'CONFIRMED',
               confirmedAt,
               error: null,
@@ -174,6 +185,7 @@ export class LiveBetExecutor {
     sessionId: string;
     stake: number;
     target: number;
+    dryRun?: boolean;
   }): PlaceBetRequest {
     const betId = randomUUID();
     return {
@@ -183,7 +195,7 @@ export class LiveBetExecutor {
       stake: opts.stake,
       target: opts.target,
       idempotencyKey: IdempotencyKeyStore.generateKey(opts.sessionId, opts.roundId),
-      dryRun: false,
+      dryRun: opts.dryRun ?? false,
     };
   }
 
@@ -197,6 +209,8 @@ export class LiveBetExecutor {
       placed: false,
       betId: request.betId,
       roundId: request.roundId,
+      stake: request.stake,
+      target: request.target,
       state: 'FAILED',
       confirmedAt: null,
       error,

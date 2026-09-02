@@ -103,7 +103,9 @@ export class BrowserManager {
       const proxyConfig = (this.options as { proxyConfig?: import('../config/schema').ProxyConfig }).proxyConfig;
       if (!playwrightProxy && proxyConfig?.enabled) {
         const pm = new ProxyManager();
-        void proxyConfig; // config loaded on demand
+        if (proxyConfig.pool?.length) {
+          pm.loadFromConfig(proxyConfig.pool.map((p) => p.server));
+        }
         const resolved = await pm.resolve();
         if (resolved) {
           playwrightProxy = {

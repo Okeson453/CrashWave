@@ -98,7 +98,6 @@ export class SessionSupervisor {
   private gameAdapter: GameAdapter | null = null;
   private roundObserver: RoundObserver | null = null;
   private dryRunController: DryRunController | null = null;
-  private signalEvaluator: ((roundId: string) => void | Promise<void>) | null = null;
   private readonly phaseEmitter = new EventEmitter();
   private unsubRoundStart: (() => void) | null = null;
   private unsubRoundComplete: (() => void) | null = null;
@@ -138,9 +137,6 @@ export class SessionSupervisor {
       await this.refreshAuthStatusFromPage();
 
       if (mode === 'dry-run' || mode === 'observe-only') {
-        if (mode === 'dry-run' && this.dryRunController) {
-          this.dryRunController.start(this.state.sessionId ?? 'dry-run');
-        }
         await this.navigateToGame();
         await this.initializeObservation();
         this.startHealthMonitoring();
@@ -203,10 +199,6 @@ export class SessionSupervisor {
     await this.initializeObservation();
     this.setPhase('observing');
     this.state.observing = true;
-  }
-
-  setSignalEvaluator(fn: ((roundId: string) => void | Promise<void>) | null): void {
-    this.signalEvaluator = fn;
   }
 
   setDryRunController(ctrl: DryRunController | null): void {
@@ -555,11 +547,9 @@ export class SessionSupervisor {
           )
         )
         .catch(() => undefined);
-      void this.signalEvaluator?.(roundId);
     });
 
     this.unsubRoundComplete = this.roundObserver.onRoundComplete((roundId, crashPoint) => {
-      this.dryRunController?.onRoundCompleted(roundId, crashPoint);
       void this.options.eventBus
         .emit(
           createEvent(

@@ -5,7 +5,7 @@
  */
 import type { AppConfig } from '../config/schema';
 import type { EntryDecisionService } from '../prediction/entry-decision-service';
-import type { LiveBetExecutor } from '../betting/live-executor';
+import type { LiveBetExecutor, LiveBetResult } from '../betting/live-executor';
 import type { LiveCashOutExecutor } from '../betting/live-cashout';
 import type { RiskEvaluationInput } from '../betting/types';
 import { LiveBetExecutor as LiveBetExecutorClass } from '../betting/live-executor';
@@ -70,24 +70,24 @@ function buildRiskInput(deps: LiveBridgeDeps, roundId: string): RiskEvaluationIn
 export async function onRoundStartedForLive(
   deps: LiveBridgeDeps,
   roundId: string
-): Promise<void> {
+): Promise<LiveBetResult | null> {
   const mode = String(deps.config.system?.mode ?? '').toLowerCase();
-  if (mode !== 'live') return;
-  if (!isRealExecutionAllowed(false)) {
+  if (mode !== 'live') return null;
+  if (!isRealExecutionAllowed(false, mode)) {
     logger.debug('Live bridge idle — ALLOW_REAL_EXECUTION not enabled or mode gate blocked');
-    return;
+    return null;
   }
   if (!deps.isAuthenticated() || !deps.isObserving()) {
     logger.warn({ roundId }, 'Live bridge skipped — not authenticated/observing');
-    return;
+    return null;
   }
   if (!deps.liveBetExecutor) {
     logger.warn({ roundId }, 'Live bridge skipped — no LiveBetExecutor bound');
-    return;
+    return null;
   }
 
   try {
-    const target = Number(deps.config.betting?.cashOutTarget ?? 1.3) as unknown as 1.3;
+    const target = Number(deps.config.betting?.cashOutTarget ?? 1.3);
     const stake = Number(deps.config.betting?.stakePerEntry ?? 700);
     const riskInput = buildRiskInput(deps, roundId);
 
@@ -109,7 +109,7 @@ export async function onRoundStartedForLive(
         },
         'Live entry not taken'
       );
-      return;
+      return null;
     }
 
     const req = LiveBetExecutorClass.buildRequest({
@@ -123,11 +123,14 @@ export async function onRoundStartedForLive(
       openLiveBets.add(roundId);
       deps.liveCashOutExecutor?.setTarget(Number(decision.signal.target ?? target));
       logger.info({ roundId, betId: result.betId, latencyMs: result.latencyMs }, 'Live bet accepted');
+      return result;
     } else {
       logger.warn({ roundId, error: result.error }, 'Live bet placement failed');
+      return result;
     }
   } catch (err) {
     logger.warn({ roundId, error: String(err) }, 'Live bridge evaluation failed');
+    return null;
   }
 }
 
