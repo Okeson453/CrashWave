@@ -25,7 +25,12 @@ RUN npm ci --omit=dev
 COPY config.yaml ./
 COPY tsconfig.json tsconfig.build.json ./
 COPY src/ ./src/
-RUN npm install --no-save typescript@5.9.3 @types/node@22.10.5 @types/jest@29.5.14 \
+# Build needs TypeScript + @types/* (declared in tsconfig.json's "types").
+# NODE_ENV=production (set globally above) makes npm act as if --omit=dev is on,
+# which would skip @types/* even with --no-save. --include=dev forces them in
+# for the build step; the runtime CMD below still runs with NODE_ENV=production.
+RUN npm install --no-save --include=dev \
+      typescript@5.9.3 @types/node@22.10.5 @types/jest@29.5.14 \
  && npx tsc -p tsconfig.build.json \
  && npm cache clean --force
 
