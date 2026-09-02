@@ -48,6 +48,7 @@ import { RecoveryManager } from '../core/recovery-manager';
 import { UnknownStateRecovery } from '../ledger/unknown-state-recovery';
 import { BalanceReconciliation } from '../ledger/balance-reconciliation';
 import { BalanceTracker } from '../ledger/balance-tracker';
+import { LiveLoginService } from '../browser/live-login';
 
 const logger = getLogger();
 
@@ -208,6 +209,14 @@ export function composeApplication(config: AppConfig): CompositionHandles {
   workerFleet.register(new ValidationWorker());
   workerFleet.register(new RegimeWorker());
 
+  // Live login service — one-shot browser login for the /login Telegram command.
+  // Lazily instantiates Chromium only when /login is invoked; closes the context
+  // when done so the runtime does not hold a browser between commands.
+  const liveLogin = new LiveLoginService({
+    profileDirectory: config.browser.profileDirectory,
+    headless: config.browser.headless,
+  });
+
   // Telegram gateway
   const telegramEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN);
   let telegramGateway: TelegramGateway | null = null;
@@ -296,14 +305,41 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       sheathSystem: async () => true,
       unsheathSystem: async () => true,
       getSheathState: () => ({ state: 'armed', bettingSuspended: false, triggers: [] }),
-      loginWithCredentials: async (email: string, _password: string) => ({
-        ok: false,
-        authenticated: false,
-        detail:
-          'Live-mode browser login is not wired in this build. ' +
-          'Run `npm run dev` and load the Playwright login flow manually, ' +
-          `then the encrypted cookie will be stored. (email=${email})`,
-      }),
+      loginWithCredentials: async (email: string, password: string) => {
+        // LiveLoginService runs preflight, launches headless Chromium,
+        // submits credentials via submitBcGameLogin, captures and encrypts
+        // the resulting cookies/storage to <profileDir>/session-state.enc,
+        // and tears the browser back down. Password is held in a local
+        // variable only and goes out of scope on return — never logged,
+        // never written to disk, never sent to DB/Redis.
+        try {
+          const outcome = await liveLogin.login(email, password);
+          logger.info(
+            {
+              component: 'Composition',
+              maskedEmail: outcome.maskedEmail,
+              ok: outcome.ok,
+              authenticated: outcome.authenticated,
+              pageState: outcome.pageState,
+              regionBlocked: outcome.regionBlocked,
+            },
+            '/login handler returned'
+          );
+          return outcome;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error(
+            { component: 'Composition', error: message },
+            '/login handler threw'
+          );
+          return {
+            ok: false,
+            authenticated: false,
+            detail: `LOGIN_HANDLER_ERROR: ${message}`.slice(0, 600),
+            maskedEmail: email.length > 0 ? `${email[0]}***@${email.split('@')[1] ?? '?'}` : '***',
+          };
+        }
+      },
     });
   }
 
