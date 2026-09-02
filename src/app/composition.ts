@@ -49,6 +49,10 @@ import { UnknownStateRecovery } from '../ledger/unknown-state-recovery';
 import { BalanceReconciliation } from '../ledger/balance-reconciliation';
 import { BalanceTracker } from '../ledger/balance-tracker';
 import { SessionSupervisor } from '../core/session-supervisor';
+import { LiveBetExecutor } from '../betting/live-executor';
+import { LiveCashOutExecutor } from '../betting/live-cashout';
+import { resolvePlacementPath } from '../betting/bet-executor-factory';
+
 
 const logger = getLogger();
 
@@ -219,6 +223,10 @@ export function composeApplication(config: AppConfig): CompositionHandles {
     dryRunController,
     sessionId: runtime.sessionId,
   });
+
+  // Live placement path (page bound after supervisor has a browser page)
+  const liveBetExecutor = new LiveBetExecutor(null, betRepo);
+  const liveCashOutExecutor = new LiveCashOutExecutor(null);
 
   // Telegram gateway
   const telegramEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN);
@@ -466,6 +474,89 @@ export function composeApplication(config: AppConfig): CompositionHandles {
       logger.info({ component: 'Composition' }, 'DryRunBridge wired to RoundStarted/RoundCrashed');
     } catch (err) {
       logger.warn({ component: 'Composition', error: String(err) }, 'DryRunBridge wire skipped');
+    }
+
+    // Live bridge — isolated from dry-run; requires mode=live + ALLOW_REAL_EXECUTION
+    try {
+      const liveBridge = await import('../core/live-bridge.js');
+      const liveDeps = {
+        config,
+        entryDecisionService,
+        liveBetExecutor,
+        liveCashOutExecutor,
+        sessionId: runtime.sessionId,
+        isAuthenticated: () => sessionSupervisor.isAuthenticated(),
+        isGameLoaded: () => sessionSupervisor.getState().gameLoaded,
+        isObserving: () => sessionSupervisor.isObserving(),
+        getBalance: () => {
+          try {
+            return Number((virtualLedger as { getBalance?: () => number }).getBalance?.() ?? 0);
+          } catch {
+            return 0;
+          }
+        },
+      };
+      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string } }) => {
+        const roundId = String(ev?.payload?.roundId ?? '');
+        if (!roundId) return;
+        // Bind page each round in case browser recovered
+        try {
+          const page = sessionSupervisor.getBrowserManager()?.getPage() ?? null;
+          liveBetExecutor.bindPage(page);
+          liveCashOutExecutor.bindPage(page);
+        } catch { /* ignore */ }
+        void liveBridge.onRoundStartedForLive(liveDeps, roundId);
+      });
+      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number } }) => {
+        const p = ev?.payload;
+        if (p?.roundId) void liveBridge.onRoundCrashedForLive(liveDeps, p);
+      });
+      const path = resolvePlacementPath({
+        mode: config.system.mode as 'live' | 'dry-run' | 'observe-only' | 'maintenance',
+        liveBound: true,
+      });
+      logger.info({ component: 'Composition', placementPath: path.path }, 'LiveBridge wired');
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'LiveBridge wire skipped');
+    }
+
+    // Persist rounds when observation emits (best-effort)
+    try {
+      eventBus.on('RoundStarted', (ev: { payload?: { roundId?: string; sessionId?: string; startedAt?: string } }) => {
+        const p = ev?.payload;
+        if (!p?.roundId) return;
+        void roundRepo
+          .create({
+            externalRoundId: p.roundId,
+            sessionId: p.sessionId ?? runtime.sessionId,
+            startedAt: p.startedAt ?? new Date().toISOString(),
+            observationSource: 'session-supervisor',
+            dataQuality: 'medium',
+          })
+          .catch((e: unknown) =>
+            logger.debug({ component: 'Composition', error: String(e) }, 'round create skipped')
+          );
+      });
+      eventBus.on('RoundCrashed', (ev: { payload?: { roundId?: string; crashPoint?: number; crashedAt?: string } }) => {
+        const p = ev?.payload;
+        if (!p?.roundId || p.crashPoint == null) return;
+        void (async () => {
+          try {
+            const existing = await roundRepo.findByExternalId?.(p.roundId!);
+            if (existing?.id) {
+              await roundRepo.update(existing.id, {
+                crashedAt: p.crashedAt ?? new Date().toISOString(),
+                observedCrashPoint: p.crashPoint,
+                finalConfirmedCrashPoint: p.crashPoint,
+              });
+            }
+          } catch (e) {
+            logger.debug({ component: 'Composition', error: String(e) }, 'round update skipped');
+          }
+        })();
+      });
+    } catch (err) {
+      logger.warn({ component: 'Composition', error: String(err) }, 'Round persistence wire skipped');
     }
 
     // Start SessionSupervisor: launches browser, restores encrypted session if

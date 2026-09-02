@@ -52,9 +52,23 @@ export function parseProxyEndpoint(raw: string): ResolvedProxy | null {
  *  no pool — a single proxy from PROXY_URL env var is returned (or null
  *  for direct connection). */
 export function resolveProxy(_opts?: { sessionId?: string }): ResolvedProxy | null {
-  const raw = process.env.PROXY_URL;
+  // Prefer explicit PROXY_URL, then APP_PROXY__SERVER (+ user/pass), then legacy.
+  const raw =
+    process.env.PROXY_URL ||
+    process.env.APP_PROXY__SERVER ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    '';
   if (!raw) return null;
-  return parseProxyEndpoint(raw);
+  const resolved = parseProxyEndpoint(raw);
+  if (!resolved) return null;
+  if (!resolved.username && process.env.APP_PROXY__USERNAME) {
+    resolved.username = process.env.APP_PROXY__USERNAME;
+  }
+  if (!resolved.password && process.env.APP_PROXY__PASSWORD) {
+    resolved.password = process.env.APP_PROXY__PASSWORD;
+  }
+  return resolved;
 }
 
 /** Personal-use: no proxy pool. */
