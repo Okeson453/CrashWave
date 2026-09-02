@@ -76,5 +76,6 @@ export const DEFAULT_CONFIG: AppConfig = {
     server: null,
     username: null,
     password: null,
+    pool: [],
   },
 };

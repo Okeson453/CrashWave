@@ -58,6 +58,47 @@ export const BrowserConfigSchema = z.object({
   stealthLevel: z.enum(['off', 'minimal', 'standard', 'full']).default('standard'),
 });
 
+export const BehavioralConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  minActionDelayMs: z.number().int().nonnegative().default(80),
+  maxActionDelayMs: z.number().int().nonnegative().default(250),
+  typingWpmMin: z.number().int().positive().default(180),
+  typingWpmMax: z.number().int().positive().default(320),
+  mouseJitterPx: z.number().int().nonnegative().default(3),
+  scrollProbability: z.number().min(0).max(1).default(0.15),
+  clickDelayMinMs: z.number().int().nonnegative().default(50),
+  clickDelayMaxMs: z.number().int().nonnegative().default(180),
+  mouseStepsMin: z.number().int().positive().default(12),
+  mouseStepsMax: z.number().int().positive().default(28),
+  mouseOvershootPx: z.number().int().nonnegative().default(6),
+  typeDelayMinMs: z.number().int().nonnegative().default(40),
+  typeDelayMaxMs: z.number().int().nonnegative().default(140),
+});
+
+export const SessionConsistencyConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  checkIntervalMs: z.number().int().positive().default(15000),
+  maxConsecutiveFailures: z.number().int().positive().default(3),
+  autoRecover: z.boolean().default(true),
+  requireAuthOnStart: z.boolean().default(true),
+  maxSessionAgeHours: z.number().int().positive().default(12),
+  pauseOnAuthLoss: z.boolean().default(true),
+});
+
+export const ProxyPoolEntrySchema = z.object({
+  server: z.string().min(1),
+  username: z.string().nullable().default(null),
+  password: z.string().nullable().default(null),
+});
+
+export const ProxyConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  server: z.string().nullable().default(null),
+  username: z.string().nullable().default(null),
+  password: z.string().nullable().default(null),
+  pool: z.array(ProxyPoolEntrySchema).default([]),
+});
+
 export const PersistenceConfigSchema = z.object({
   databasePoolSize: z.number().int().positive().default(5),
   idleTimeoutMillis: z.number().int().positive().default(30000),
@@ -71,12 +112,12 @@ export const HealthConfigSchema = z.object({
   failureThreshold: z.number().int().positive().default(3),
 });
 
-export const ProxyConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  server: z.string().nullable().default(null),
-  username: z.string().nullable().default(null),
-  password: z.string().nullable().default(null),
-});
+export type BrowserConfig = z.infer<typeof BrowserConfigSchema>;
+export type BehavioralConfig = z.infer<typeof BehavioralConfigSchema>;
+export type SessionConsistencyConfig = z.infer<typeof SessionConsistencyConfigSchema>;
+export type ProxyConfig = z.infer<typeof ProxyConfigSchema>;
+export type PersistenceConfig = z.infer<typeof PersistenceConfigSchema>;
+export type HealthConfig = z.infer<typeof HealthConfigSchema>;
 
 export const AppConfigSchema = z.object({
   system: z.object({
