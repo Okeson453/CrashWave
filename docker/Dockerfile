@@ -37,6 +37,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
 COPY --from=build /app/config.yaml ./config.yaml
 COPY --from=build /ms-playwright /home/crashapp/.cache/ms-playwright
+RUN ln -sfn /home/crashapp/.cache/ms-playwright /ms-playwright && chown -R crashapp:crashapp /home/crashapp/.cache || true
 COPY --from=build /app/node_modules/playwright ./node_modules/playwright
 COPY --from=build /app/node_modules/playwright-core ./node_modules/playwright-core
 

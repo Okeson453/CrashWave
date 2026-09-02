@@ -38,7 +38,7 @@ services:
       DATABASE_URL: postgresql://bc:${POSTGRES_PASSWORD}@postgres:5432/bc_personal
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?generate via npm run generate-key and paste}
       BROWSER_HEADLESS: "true"
-      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      PLAYWRIGHT_BROWSERS_PATH: /home/crashapp/.cache/ms-playwright
       METRICS_PORT: 9090
     volumes:
       - app_secrets:/app/secrets

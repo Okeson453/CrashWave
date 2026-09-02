@@ -72,9 +72,13 @@ COPY --from=build /ms-playwright    /home/crashapp/.cache/ms-playwright
 COPY migrations/ ./migrations/
 COPY scripts/run-migrations.mjs scripts/healthcheck.sh ./scripts/
 
+# Browsers live under the crashapp home cache. Also symlink /ms-playwright so
+# deployments that still set PLAYWRIGHT_BROWSERS_PATH=/ms-playwright (compose /
+# .env.example) keep working instead of pointing at an empty directory.
 RUN mkdir -p logs /home/crashapp/.cache \
+ && ln -sfn /home/crashapp/.cache/ms-playwright /ms-playwright \
  && chmod +x ./scripts/*.sh ./scripts/run-migrations.mjs \
- && chown -R crashapp:crashapp /app /home/crashapp
+ && chown -R crashapp:crashapp /app /home/crashapp /home/crashapp/.cache
 
 USER crashapp
 EXPOSE 9090
